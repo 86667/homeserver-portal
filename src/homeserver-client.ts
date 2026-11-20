@@ -8,7 +8,7 @@
  * This is the only module that loads the Pubky SDK. It is loaded on demand in
  * the browser: it is large, and its Node build must never run in the server.
  */
-import type { Capabilities, GrantSession, Pubky, Session } from '@synonymdev/pubky';
+import type { AccountInfo as SdkAccount, Capabilities, GrantSession, Pubky, Session } from '@synonymdev/pubky';
 import { parseHomeserverTime } from './account';
 import { parseEventStream } from './activity';
 import {
@@ -19,7 +19,6 @@ import {
   type HomeserverInfo,
   type InviteStatus,
   type Profile,
-  type PublicFile,
   ACCOUNT_CAPABILITY,
   readsRoot,
   type SignedRecord,
@@ -38,18 +37,6 @@ export type RingRequest = {
   awaitAccount: () => Promise<AccountInfo>;
 };
 
-/**
- * The account as the SDK's `GrantSession.account()` returns it, with the
- * method itself optional: SDK releases up to 0.17.1 do not have it.
- */
-type SdkAccount = {
-  createdAt: string;
-  disabled: boolean;
-  usedBytes: number;
-  quota: AccountRecord['quota'];
-};
-type GrantView = GrantSession & { account?: () => Promise<SdkAccount> };
-
 /** The SDK's error for a homeserver's refusal names the pubky it could not place. */
 const UNRESOLVED_HOMESERVER = /could not resolve homeserver for ([a-z0-9]{52})/;
 
@@ -63,8 +50,6 @@ const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
 /** A syntactically valid code no homeserver issues; asks whether codes are required. */
 const PROBE_INVITE_CODE = '0000-0000-0000';
 
-/** Files per listing request; the homeserver pages beyond that with a cursor. */
-const LIST_PAGE = 1000;
 /** An avatar larger than this is not shown. */
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 /** Where a key's signed record is read from: the Pubky SDK's default relay, or the testnet's. */
@@ -140,7 +125,7 @@ export class HomeserverClient {
   private async confirmAccount(session: Session): Promise<AccountInfo> {
     const pubky = session.info.publicKey.z32();
     try {
-      const grant = session.grant as GrantView | undefined;
+      const grant = session.grant;
       if (!grant) throw new Error('The sign-in did not open a grant session');
       const info = await grant.sessionInfo();
       const homeserver = info.homeserver.z32();
@@ -152,45 +137,6 @@ export class HomeserverClient {
       // Best effort: a grant left behind expires on its own.
       await session.signout().catch(() => undefined);
     }
-  }
-
-  /**
-   * Every file under `pubky`'s `/pub/` on this homeserver, oldest path first,
-   * without sizes: the listing names files only. At most `max` files; more
-   * than that is reported by the caller as "and more". Public data: it needs no session.
-   */
-  async listPublicFiles(
-    pubky: string,
-    max = 5000,
-    pageSize = LIST_PAGE,
-  ): Promise<{ files: PublicFile[]; more: boolean }> {
-    const files: PublicFile[] = [];
-    let cursor: string | null = null;
-    while (files.length < max) {
-      const limit = Math.min(pageSize, max - files.length);
-      const query = `limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
-      const response = await this.homeserverFetch(`/storage/${pubky}/pub/?${query}`);
-      if (response.status === 404) break; // nothing stored yet
-      if (!response.ok) throw new Error(`The homeserver could not list the files (${response.status})`);
-      const page = parseListing(await response.text());
-      files.push(...page);
-      if (page.length < limit) return { files, more: false };
-      cursor = page[page.length - 1].url;
-    }
-    return { files, more: files.length >= max };
-  }
-
-  /** The file's size, modification time and type, from a HEAD request. */
-  async fileStats(file: PublicFile): Promise<Pick<PublicFile, 'size' | 'modifiedAt' | 'contentType'>> {
-    const response = await this.homeserverFetch(storagePath(file.url), { method: 'HEAD' });
-    if (!response.ok) throw new Error(`The homeserver could not describe ${file.path} (${response.status})`);
-    const modified = response.headers.get('last-modified');
-    const modifiedAt = modified ? new Date(modified) : undefined;
-    return {
-      size: Number(response.headers.get('content-length') ?? NaN) || 0,
-      modifiedAt: modifiedAt && !Number.isNaN(modifiedAt.getTime()) ? modifiedAt : undefined,
-      contentType: response.headers.get('content-type') ?? undefined,
-    };
   }
 
   /** The person's pubky.app profile, or null when they have none here. */
@@ -284,12 +230,11 @@ export class HomeserverClient {
 
 /**
  * The account as the homeserver reports it, or undefined when it does not:
- * a homeserver from before `GET /account` takes the path for a storage read
- * and refuses it (403 on 0.17, 404 otherwise), and an SDK from before
- * `account()` cannot ask. Any other failure is reported.
+ * a homeserver from before `GET /account` (0.18) takes the path for a storage
+ * read and refuses it (403 on 0.17, 404 otherwise). Any other failure is
+ * reported.
  */
-async function readAccount(grant: GrantView): Promise<AccountRecord | undefined> {
-  if (typeof grant.account !== 'function') return undefined;
+async function readAccount(grant: GrantSession): Promise<AccountRecord | undefined> {
   try {
     return toAccountRecord(await grant.account());
   } catch (error) {
@@ -346,18 +291,6 @@ async function statusOf(response: Response): Promise<InviteStatus> {
   return 'error';
 }
 
-/** The files in a listing: one `pubky://` address per line; folders end with `/` and are skipped. */
-function parseListing(text: string): PublicFile[] {
-  return text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith('pubky://') && !line.endsWith('/'))
-    .map((url) => {
-      const path = url.slice(url.indexOf('/pub/') + '/pub/'.length);
-      return { url, path, app: path.includes('/') ? path.slice(0, path.indexOf('/')) : '' };
-    });
-}
-
 /** `https://host[:port]` of a response's URL, or null when it is not an http(s) URL. */
 function originOf(url: string): string | null {
   try {
@@ -366,11 +299,6 @@ function originOf(url: string): string | null {
   } catch {
     return null;
   }
-}
-
-/** `pubky://<user>/pub/x` as this homeserver's path-addressed route, `/storage/<user>/pub/x`. */
-function storagePath(url: string): string {
-  return `/storage/${url.slice('pubky://'.length)}`;
 }
 
 const isLink = (value: unknown): value is { title: string; url: string } =>

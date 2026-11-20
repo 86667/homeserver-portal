@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AccountConfig, AccountInfo, AccountRecord, FeedEvent, InviteStatus, Profile, PublicFile } from '../model';
+import type { AccountConfig, AccountInfo, AccountRecord, FeedEvent, InviteStatus, Profile } from '../model';
 import { AccountFlow } from './AccountFlow';
 import { HomeserverClient, type RingRequest } from '../homeserver-client';
 
@@ -19,7 +19,6 @@ type FakeHomeserver = {
   /** The code's status, by how many times it has been asked about. */
   inviteStatus?: (askedBefore: number) => InviteStatus;
   account?: () => Promise<AccountInfo>;
-  files?: PublicFile[];
   profile?: Profile | null;
   events?: FeedEvent[];
 };
@@ -42,19 +41,11 @@ const ALICE_ACCOUNT: AccountRecord = {
   },
 };
 
-const publicFile = (path: string, size: number): PublicFile => ({
-  url: `pubky://${ALICE}/pub/${path}`,
-  path,
-  app: path.split('/')[0],
-  size,
-});
-
 /** A homeserver client whose answers the test chooses. */
 function homeserver({
   inviteRequired = true,
   inviteStatus = () => 'valid',
   account = () => Promise.resolve({ pubky: ALICE, hasAccount: true }),
-  files = [publicFile('pubky.app/profile.json', 140), publicFile('pubky.app/posts/1', 60)],
   profile = { name: 'Alice', bio: 'Hi there', status: null, links: [], avatar: null },
   events = [feedEvent('PUT', BOB, 'site/index.html'), feedEvent('PUT', ALICE, 'pubky.app/profile.json')],
 }: FakeHomeserver = {}) {
@@ -65,8 +56,6 @@ function homeserver({
     startRequest: vi.fn(
       async (): Promise<RingRequest> => ({ authUrl: 'pubkyauth://signup?secret=s', awaitAccount: () => account() }),
     ),
-    listPublicFiles: vi.fn(async () => ({ files: files.map(({ size: _, ...f }) => ({ ...f })), more: false })),
-    fileStats: vi.fn(async (f: PublicFile) => ({ size: files.find((x) => x.path === f.path)?.size ?? 0 })),
     profile: vi.fn(async (pubky: string) => (pubky === ALICE ? profile : null)),
     ownEvents: vi.fn(async (pubky: string, cursor: string | null, _limit: number, path = '') => {
       const mine = events.filter((e) => e.pubky === pubky && e.path.startsWith(path)).reverse();
@@ -431,7 +420,7 @@ describe('AccountFlow page', () => {
 });
 
 describe('AccountFlow signed-in details', () => {
-  it('shows the profile, and the space the public files take inside the account card', async () => {
+  it('shows the profile', async () => {
     const client = homeserver();
     renderOnAccount();
     fireEvent.click(await screen.findByTestId('account-signin'));
@@ -439,32 +428,14 @@ describe('AccountFlow signed-in details', () => {
 
     expect((await screen.findByTestId('profile-name')).textContent).toBe('Alice');
     expect(screen.getByText('Hi there')).toBeTruthy();
-    const space = await screen.findByTestId('space-used');
-    expect(screen.getByTestId('account-details').contains(space)).toBe(true);
-    await waitFor(() => expect(space.textContent).toContain('200 B'));
-    expect(space.textContent).toContain('in 2 public files');
-    expect(space.textContent).not.toContain('profile.json');
-    expect(client.listPublicFiles).toHaveBeenCalledWith(ALICE);
     expect(client.profile).toHaveBeenCalledWith(ALICE);
   });
 
-  it('does not measure the files when the homeserver reports the storage itself', async () => {
-    const client = homeserver({
-      account: () => Promise.resolve({ pubky: ALICE, hasAccount: true, account: ALICE_ACCOUNT }),
-    });
-    renderOnAccount();
-    fireEvent.click(await screen.findByTestId('account-signin'));
-    await screen.findByTestId('account-storage');
-    expect(screen.queryByTestId('space-used')).toBeNull();
-    expect(client.listPublicFiles).not.toHaveBeenCalled();
-  });
-
-  it('says so when there is no profile, and counts nothing stored as no space', async () => {
-    homeserver({ files: [], profile: null });
+  it('says so when there is no profile', async () => {
+    homeserver({ profile: null });
     renderOnAccount();
     fireEvent.click(await screen.findByTestId('account-signin'));
     await screen.findByTestId('profile-none');
-    expect((await screen.findByTestId('space-used')).textContent).toContain('0 B');
   });
 
   it('lets the welcome be dismissed, keeping the account below it', async () => {
@@ -483,7 +454,6 @@ describe('AccountFlow signed-in details', () => {
     fireEvent.click(await screen.findByTestId('account-signin'));
     await screen.findByTestId('account-missing');
     expect(screen.queryByTestId('profile-card')).toBeNull();
-    expect(screen.queryByTestId('space-used')).toBeNull();
   });
 
   it('removes the profile again on sign-out', async () => {

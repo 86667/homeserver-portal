@@ -5,7 +5,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Skeleton } from '@/components/ui/skeleton';
 import type { useAccountFlow } from '../useAccountFlow';
 import type { ProfileState } from '../useProfile';
-import type { PublicFiles } from '../usePublicFiles';
 import { describeOutcome } from '../outcome';
 import { AccountDetails } from './AccountDetails';
 import { ErrorPanel } from './ErrorPanel';
@@ -15,13 +14,11 @@ import { WaitingStep } from './WaitingStep';
 
 interface AccountTabProps {
   flow: ReturnType<typeof useAccountFlow>;
-  /** The person's public files, measured when the homeserver does not report their storage itself. */
-  files: PublicFiles;
   profile: ProfileState;
 }
 
 /** The account tab: the sign-up/sign-in card, and once signed in, the person's profile. */
-export function AccountTab({ flow, files, profile }: AccountTabProps) {
+export function AccountTab({ flow, profile }: AccountTabProps) {
   const signedIn = flow.step.name === 'done' && flow.step.info.hasAccount;
   return (
     <>
@@ -36,7 +33,7 @@ export function AccountTab({ flow, files, profile }: AccountTabProps) {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <Steps flow={flow} files={files} />
+          <Steps flow={flow} />
         </CardContent>
       </Card>
       {signedIn && <ProfileCard state={profile} />}
@@ -44,7 +41,7 @@ export function AccountTab({ flow, files, profile }: AccountTabProps) {
   );
 }
 
-function Steps({ flow, files }: Pick<AccountTabProps, 'flow' | 'files'>) {
+function Steps({ flow }: Pick<AccountTabProps, 'flow'>) {
   const { step, invite, inviteRequired, canSignUp, start, backToStart, retryConnect } = flow;
   switch (step.name) {
     case 'connecting':
@@ -78,7 +75,6 @@ function Steps({ flow, files }: Pick<AccountTabProps, 'flow' | 'files'>) {
         <AccountDetails
           outcome={describeOutcome(step.kind, step.info, step.inviteStatus)}
           info={step.info}
-          files={files}
           onSignOut={backToStart}
         />
       );

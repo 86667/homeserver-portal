@@ -15,7 +15,6 @@ import { useAccountFlow } from '../useAccountFlow';
 import { useOwnActivity } from '../useOwnActivity';
 import { useHomeserver } from '../useHomeserver';
 import { useProfile } from '../useProfile';
-import { usePublicFiles } from '../usePublicFiles';
 
 type Tab = 'homeserver' | 'account' | 'activity';
 
@@ -51,9 +50,6 @@ function ConnectedTabs({ config, initialCode }: { config: AccountConfig; initial
 
   const flow = useAccountFlow(config, initialCode);
   const signedIn = flow.step.name === 'done' && flow.step.info.hasAccount ? flow.step.info.pubky : null;
-  // The files are only measured to say what space they take, which a homeserver that reports the account says itself.
-  const reported = flow.step.name === 'done' && flow.step.info.hasAccount && flow.step.info.account !== undefined;
-  const files = usePublicFiles(flow.client, reported ? null : signedIn);
   const profile = useProfile(flow.client, signedIn);
   const own = useOwnActivity(flow.client, signedIn, opened.has('activity'));
   const homeserver = useHomeserver(flow.client, opened.has('homeserver'));
@@ -79,7 +75,7 @@ function ConnectedTabs({ config, initialCode }: { config: AccountConfig; initial
         homeserver={
           <HomeserverTab homeserver={config.homeserver} state={homeserver} inviteRequired={flow.inviteRequired} />
         }
-        account={<AccountTab flow={flow} files={files} profile={profile} />}
+        account={<AccountTab flow={flow} profile={profile} />}
         activity={signedIn && <ActivityTab own={own} />}
       />
     </AccountPage>
