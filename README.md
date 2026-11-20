@@ -4,26 +4,61 @@ The public page for the people who use a Pubky homeserver. They sign up with [Pu
 
 It is plain static files with no server side and no admin credential: the visitor's browser talks to the homeserver's public API itself. It began as part of [homeserver-dashboard](https://github.com/pubky/homeserver-dashboard), the homeserver's admin dashboard, and keeps the same look; the two are separate programs and neither needs the other.
 
+## Run it for your homeserver
+
+The portal is a directory of files. Any web server can serve it, and the one that already holds your domain and its TLS certificate is the natural choice. You need the homeserver's public key and a domain for the page, ideally a sub-domain of the homeserver's (`portal.example.com` next to `homeserver.example.com`).
+
+1. Download the [latest release](https://github.com/86667/homeserver-portal/releases/latest) and unpack it. There is one archive for every platform. The commands here use version 0.1.0; put the release's version in its place:
+
+   ```sh
+   curl --fail --location --remote-name https://github.com/86667/homeserver-portal/releases/download/v0.1.0/homeserver-portal-v0.1.0.tar.gz
+   tar --extract --gzip --file homeserver-portal-v0.1.0.tar.gz
+   ```
+
+   It unpacks to `homeserver-portal-v0.1.0/`: `site/` is the directory to serve, `config.example.json` is the config to fill in, and `examples/Caddyfile` is a site file for Caddy.
+
+2. Put `site/` where your web server serves from, with a `config.json` in it:
+
+   ```sh
+   sudo mkdir -p /var/www
+   sudo cp -r homeserver-portal-v0.1.0/site /var/www/homeserver-portal
+   sudo cp homeserver-portal-v0.1.0/config.example.json /var/www/homeserver-portal/config.json
+   ```
+
+3. Edit `/var/www/homeserver-portal/config.json` and set `homeserverPublicKey` to your homeserver's public key. The key is on the Overview page of the [admin dashboard](https://github.com/pubky/homeserver-dashboard), and it is the `public_key` that the homeserver's admin API reports at `/info`. The portal itself never talks to the admin API. See [Configuration](#configuration) for the other two settings.
+
+4. Serve the directory. With [Caddy](https://caddyserver.com/), which also gets the TLS certificate: copy the site from `examples/Caddyfile` into your Caddyfile, replace `portal.example.com` with your domain, and reload Caddy. Any other web server works too: point it at the directory and set the same headers.
+
+Open the page: its Homeserver tab shows whether it reached your homeserver. With no usable key in `config.json`, the page says it is not set up.
+
+The page carries most of its security policy in its own HTML, so it restricts itself even on a web server set up without the headers in the example. Keep them anyway: only a header can stop another site from framing the page (`frame-ancestors`) or the browser from guessing file types (`nosniff`).
+
+To update, copy the new release's `site/` over the old one. The archive has no `config.json`, so yours stays:
+
+```sh
+sudo cp -r homeserver-portal-v0.1.0/site/. /var/www/homeserver-portal/
+```
+
 ## Configuration
 
-Three settings, read when the container starts and handed to the page as `config.json`. None is a secret.
+`config.json` sits next to `index.html` and the page reads it on every load. None of it is a secret.
 
-| Variable                | Description                                                                                                                                               | Default                               |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
-| `HOMESERVER_PUBLIC_KEY` | The homeserver's public key (the `public_key` its admin `/info` reports). The page finds the homeserver by it.                                            | unset: the page says it is not set up |
-| `AUTH_RELAY`            | HTTP relay Pubky Ring answers through. Visitors' browsers wait on it, so it must be reachable from them (never `localhost`), over HTTPS when the page is. | the Pubky SDK's relay                 |
-| `PUBKY_TESTNET_HOST`    | Development only: use a local pubky-testnet on this host instead of mainnet.                                                                              | unset                                 |
+| Setting               | Description                                                                                                                                               | When `null`                    |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| `homeserverPublicKey` | The homeserver's public key. The page finds the homeserver by it.                                                                                         | the page says it is not set up |
+| `relay`               | HTTP relay Pubky Ring answers through. Visitors' browsers wait on it, so it must be reachable from them (never `localhost`), over HTTPS when the page is. | the Pubky SDK's relay          |
+| `testnetHost`         | Development only: use a local pubky-testnet on this host instead of mainnet.                                                                              | mainnet                        |
 
-A value that is set but malformed stops the container at start.
+## Docker
 
-## Running it
+The image is the same files served by nginx on port 8080, as an unprivileged user, with the security headers set. There is no published image yet; build it from a checkout:
 
 ```sh
 docker build -t homeserver-portal .
 docker run -p 8080:8080 -e HOMESERVER_PUBLIC_KEY=<key> homeserver-portal
 ```
 
-The image serves the page on port 8080 with nginx, as an unprivileged user, with a strict Content Security Policy. Put it behind your TLS proxy, ideally on a sub-domain of the homeserver's domain (e.g. `account.example.com` next to `homeserver.example.com`); see the limits below for why.
+The container writes `config.json` from its environment when it starts: `HOMESERVER_PUBLIC_KEY`, `AUTH_RELAY` and `PUBKY_TESTNET_HOST` set `homeserverPublicKey`, `relay` and `testnetHost`. A value that is set but malformed stops the container at start. Put the container behind your TLS proxy.
 
 ## How it works
 
@@ -60,6 +95,8 @@ npm run typecheck
 npm run build                               # static files in dist/
 ```
 
+`scripts/release-archive.sh` packs `dist/` into the release archive and `scripts/smoke-test-archive.sh <archive>` checks one by unpacking and serving it. A release is a `v*.*.*` tag that matches the version in `package.json`: the release workflow builds, packs and smoke-tests the archive and attaches it to the GitHub release.
+
 `npm run e2e` drives the page in Chrome against a local pubky-testnet, with the Pubky SDK playing Ring; it skips when no testnet answers. See the header of `e2e/account.spec.mjs` for its settings.
 
 ## Code layout
@@ -75,5 +112,8 @@ npm run build                               # static files in dist/
 | `src/homeserver-client.ts` | The only module that loads the Pubky SDK: invite checks, Ring requests, sign-in checks, public file, profile and feed reads.   |
 | `src/config.ts`            | Loads and checks `config.json`.                                                                                                |
 | `docker/`                  | nginx config, security headers, and the start-up script that writes `config.json`.                                             |
+| `security-policy.mjs`      | The security policy: built into the page, and repeated as headers in `examples/` and `docker/` (a test keeps them equal).      |
+| `examples/`                | A Caddy site file for serving a release.                                                                                       |
+| `scripts/`                 | Packs the release archive and smoke-tests it.                                                                                  |
 
 `src/components/ui`, `src/hooks/useCopyFeedback.ts`, `src/lib/` and `src/theme.css` are the UI primitives, helpers and theme copied from the admin dashboard, kept as they are there so a change in one can be carried to the other.

@@ -1,0 +1,5 @@
+{
+  "homeserverPublicKey": "<your homeserver's public key>",
+  "relay": null,
+  "testnetHost": null
+}
