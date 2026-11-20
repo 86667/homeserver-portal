@@ -826,6 +826,20 @@ describe('profile', () => {
     expect(await client.profile(ALICE)).toBeNull();
   });
 
+  it('shows no link that would run script, or that is not a full address', async () => {
+    const links = [
+      { title: 'Site', url: 'https://alice.example' },
+      { title: 'Mail', url: 'mailto:a@alice.example' },
+      { title: 'Script', url: ' JavaScript:alert(1)' },
+      { title: 'Page', url: 'data:text/html,<script>alert(1)</script>' },
+      { title: 'Old', url: 'vbscript:x' },
+      { title: 'Relative', url: 'alice.example' },
+    ];
+    homeserver({ [url]: () => json({ name: 'Alice', links }) });
+    const client = await HomeserverClient.connect(config);
+    expect((await client.profile(ALICE))?.links).toEqual(links.slice(0, 2));
+  });
+
   it('reads name, bio, status and links, dropping what is malformed', async () => {
     homeserver({
       [url]: () =>

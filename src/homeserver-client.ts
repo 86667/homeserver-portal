@@ -12,7 +12,6 @@ import type {
   AccountInfo as SdkAccount,
   AuthFlowKind,
   Capabilities,
-  GrantAuthFlowOptions,
   GrantSession,
   Pubky,
   Session,
@@ -34,8 +33,9 @@ import {
   type SignedRecord,
 } from './model';
 import { parseSignedRecord } from './pkarr';
-import { type ProfileEdit, mergeProfile } from './profile';
+import { type ProfileEdit, isFollowableLink, mergeProfile } from './profile';
 import { withTimeout } from './with-timeout';
+import { messageOf } from './format';
 
 type Sdk = typeof import('@synonymdev/pubky');
 
@@ -119,10 +119,7 @@ export class HomeserverClient {
   async startRequest(kind: RingRequestKind, inviteCode: string | null): Promise<RingRequest> {
     const mine = {};
     await this.endSignIn(mine);
-    const flow = await this.startFlow(ACCOUNT_CAPABILITY as Capabilities, this.flowKind(kind, inviteCode), {
-      clientId: clientId(),
-      relay: this.config.relay,
-    });
+    const flow = await this.startFlow(this.flowKind(kind, inviteCode));
     const account = flow.awaitApproval().then(
       (session) => this.confirmAccount(session, mine),
       (error: unknown) => noAccountOf(error),
@@ -147,7 +144,9 @@ export class HomeserverClient {
    * script cannot copy out. Elsewhere a plain flow, whose session lasts until
    * the page is closed and is never saved.
    */
-  private async startFlow(capabilities: Capabilities, kind: AuthFlowKind, options: GrantAuthFlowOptions) {
+  private async startFlow(kind: AuthFlowKind) {
+    const capabilities = ACCOUNT_CAPABILITY as Capabilities;
+    const options = { clientId: clientId(), relay: this.config.relay };
     return (await this.canKeepSignIn())
       ? this.sdk.GrantAuthFlow.startDelegated(capabilities, kind, options)
       : this.pubky.startGrantAuthFlow(capabilities, kind, options);
@@ -363,7 +362,8 @@ export class HomeserverClient {
       name: raw.name,
       bio: typeof raw.bio === 'string' && raw.bio.trim() ? raw.bio : null,
       status: typeof raw.status === 'string' && raw.status.trim() ? raw.status : null,
-      links: Array.isArray(raw.links) ? raw.links.filter(isLink) : [],
+      // Another app may have stored an address that runs script; such a link is not shown.
+      links: Array.isArray(raw.links) ? raw.links.filter(isLink).filter((link) => isFollowableLink(link.url)) : [],
       avatar: typeof raw.image === 'string' && raw.image ? await this.avatar(raw.image).catch(() => null) : null,
     };
   }
@@ -561,8 +561,6 @@ function statusCodeOf(error: unknown): number | null {
   const status = typeof data === 'object' && data !== null ? (data as { statusCode?: unknown }).statusCode : undefined;
   return typeof status === 'number' ? status : null;
 }
-
-const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /** How the page names itself in Ring's list of grants: its host. */
 function clientId(): string {

@@ -51,13 +51,14 @@ export function cleanProfileEdit(edit: ProfileEdit): ProfileEdit {
 /** Checks a cleaned edit against pubky.app's limits. Lengths count characters, as pubky.app does, not UTF-16 units. */
 export function profileErrors(edit: ProfileEdit): ProfileErrors {
   const errors: ProfileErrors = {};
-  const name = length(edit.name);
+  const name = characterCount(edit.name);
   if (name < PROFILE_LIMITS.nameMin || name > PROFILE_LIMITS.nameMax)
     errors.name = `A name has ${PROFILE_LIMITS.nameMin} to ${PROFILE_LIMITS.nameMax} characters.`;
   // pubky.app shows this name for a deleted profile, and does not take it as one.
   else if (edit.name === '[DELETED]') errors.name = 'This name is not available.';
-  if (length(edit.bio) > PROFILE_LIMITS.bioMax) errors.bio = `A bio has up to ${PROFILE_LIMITS.bioMax} characters.`;
-  if (length(edit.status) > PROFILE_LIMITS.statusMax)
+  if (characterCount(edit.bio) > PROFILE_LIMITS.bioMax)
+    errors.bio = `A bio has up to ${PROFILE_LIMITS.bioMax} characters.`;
+  if (characterCount(edit.status) > PROFILE_LIMITS.statusMax)
     errors.status = `A status has up to ${PROFILE_LIMITS.statusMax} characters.`;
   const links = linksError(edit.links);
   if (links) errors.links = links;
@@ -68,13 +69,12 @@ function linksError(links: ProfileEdit['links']): string | undefined {
   if (links.length > PROFILE_LIMITS.links) return `A profile has up to ${PROFILE_LIMITS.links} links.`;
   for (const { title, url } of links) {
     if (!title || !url) return 'Each link needs a title and an address.';
-    if (length(title) > PROFILE_LIMITS.linkTitleMax)
+    if (characterCount(title) > PROFILE_LIMITS.linkTitleMax)
       return `A link's title has up to ${PROFILE_LIMITS.linkTitleMax} characters.`;
-    if (length(url) > PROFILE_LIMITS.linkUrlMax)
+    if (characterCount(url) > PROFILE_LIMITS.linkUrlMax)
       return `A link's address has up to ${PROFILE_LIMITS.linkUrlMax} characters.`;
-    const parsed = parseUrl(url);
-    if (!parsed) return `"${url}" is not a full address, such as https://example.com.`;
-    if (SCRIPT_SCHEMES.includes(parsed.protocol)) return `"${url}" is not an address a link can have.`;
+    if (!parseUrl(url)) return `"${url}" is not a full address, such as https://example.com.`;
+    if (!isFollowableLink(url)) return `"${url}" is not an address a link can have.`;
   }
   return undefined;
 }
@@ -94,10 +94,20 @@ export function mergeProfile(stored: Record<string, unknown>, edit: ProfileEdit)
   };
 }
 
-const length = (text: string) => [...text].length;
+/** A text's length as pubky.app counts it: in characters, not UTF-16 units. */
+export const characterCount = (text: string) => [...text].length;
 
-/** Addresses that run script where they are followed. pubky.app's model takes them; the page does not write them. */
+/**
+ * Addresses that run script where they are followed. pubky.app's model takes
+ * them; the page neither writes them nor shows them as links.
+ */
 const SCRIPT_SCHEMES = ['javascript:', 'data:', 'vbscript:'];
+
+/** Whether an address is one the page writes, and shows as a link: a full one that runs no script. */
+export function isFollowableLink(url: string): boolean {
+  const parsed = parseUrl(url);
+  return parsed !== null && !SCRIPT_SCHEMES.includes(parsed.protocol);
+}
 
 function parseUrl(text: string): URL | null {
   try {

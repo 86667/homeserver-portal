@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { HomeserverClient } from './homeserver-client';
 import type { Profile } from './model';
 import type { ProfileEdit } from './profile';
+import { messageOf } from './format';
 
 export type ProfileState =
   | { status: 'idle' }
@@ -35,7 +36,7 @@ export function useProfile(client: HomeserverClient | null, pubky: string | null
         if (!cancelled) setState({ status: 'done', profile });
       })
       .catch((error) => {
-        if (!cancelled) setState({ status: 'failed', message: error instanceof Error ? error.message : String(error) });
+        if (!cancelled) setState({ status: 'failed', message: messageOf(error) });
       });
     return () => {
       cancelled = true;

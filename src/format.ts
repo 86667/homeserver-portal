@@ -37,3 +37,6 @@ export function formatAge(ms: number): string {
   const days = Math.floor(hours / 24);
   return `${days} days ago`;
 }
+
+/** What went wrong, in the error's own words. */
+export const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));

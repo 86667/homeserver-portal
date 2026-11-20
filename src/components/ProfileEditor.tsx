@@ -10,10 +10,12 @@ import {
   type ProfileEdit,
   type ProfileErrors,
   PROFILE_LIMITS,
+  characterCount,
   cleanProfileEdit,
   editOf,
   profileErrors,
 } from '../profile';
+import { messageOf } from '../format';
 
 interface ProfileEditorProps {
   /** The profile to start from; null to write a first one. */
@@ -50,7 +52,7 @@ export function ProfileEditor({ profile, onSave, onClose }: ProfileEditorProps) 
       await onSave(cleaned);
       onClose();
     } catch (error) {
-      setFailure(error instanceof Error ? error.message : String(error));
+      setFailure(messageOf(error));
       setSaving(false);
     }
   };
@@ -81,7 +83,7 @@ export function ProfileEditor({ profile, onSave, onClose }: ProfileEditorProps) 
         id="profile-bio"
         label="Bio"
         error={errors.bio}
-        hint={`${[...cleaned.bio].length} of ${PROFILE_LIMITS.bioMax}`}
+        hint={`${characterCount(cleaned.bio)} of ${PROFILE_LIMITS.bioMax}`}
       >
         <textarea
           id="profile-bio"

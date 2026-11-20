@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { type Burst, groupBursts, pathUnderPub, summarizeFolders } from './activity';
 import type { HomeserverClient } from './homeserver-client';
 import type { FeedEvent } from './model';
+import { messageOf } from './format';
 
 /** Events per page: the first read, and each "load more". */
 export const OWN_PAGE = 10;
@@ -127,4 +128,3 @@ const IDLE: Pages = {
   shownPath: '',
   checkedAt: null,
 };
-const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));

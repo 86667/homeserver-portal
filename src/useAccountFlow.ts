@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AccountConfig, AccountInfo, InviteStatus } from './model';
 import { HomeserverClient, type RingRequestKind } from './homeserver-client';
 import { useInviteCode } from './useInviteCode';
+import { messageOf } from './format';
 
 export type Step =
   | { name: 'connecting' }
@@ -11,8 +12,6 @@ export type Step =
   | { name: 'checking' }
   | { name: 'done'; kind: RingRequestKind; info: AccountInfo; inviteStatus?: InviteStatus }
   | { name: 'failed'; message: string };
-
-const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /**
  * The portal's steps: connect to the homeserver, then sign up or sign
