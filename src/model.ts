@@ -1,13 +1,25 @@
 /** The portal's shared types, and the invite code format. */
 
+/** The one file the portal writes: a person's pubky.app profile. */
+export const PROFILE_PATH = '/pub/pubky.app/profile.json';
+
 /**
- * The capability the portal asks Pubky Ring to sign: read everything,
- * write nothing. The homeserver reports an account (`GET /account`) only to
- * a session whose grant reads the root `/`, since an account is not scoped
- * to any path. The page uses the session for that one read and then revokes
- * the grant, so nothing stays authorised afterwards.
+ * The capabilities the portal asks Pubky Ring to sign: read everything, and
+ * write the profile file only. The homeserver reports an account
+ * (`GET /account`) only to a session whose grant reads the root `/`, since an
+ * account is not scoped to any path; the write is for the profile editor.
+ * The page keeps the session while the person is signed in and revokes the
+ * grant when they sign out.
  */
-export const ACCOUNT_CAPABILITY = '/:r';
+export const ACCOUNT_CAPABILITY = `/:r,${PROFILE_PATH}:rw`;
+
+/** Whether a granted capability lets the page write the profile file: one on that file, or on a folder above it. */
+export function writesProfile(capability: string): boolean {
+  const colon = capability.lastIndexOf(':');
+  const scope = capability.slice(0, colon);
+  const covers = scope === PROFILE_PATH || (scope.endsWith('/') && PROFILE_PATH.startsWith(scope));
+  return covers && capability.slice(colon + 1).includes('w');
+}
 
 /** Whether a granted capability (as the SDK lists them, e.g. `/:rw`) reads the root, which `GET /account` needs. */
 export const readsRoot = (capability: string) => /^\/:[a-z]*r[a-z]*$/.test(capability);
@@ -59,6 +71,8 @@ export type AccountInfo =
       account?: AccountRecord;
       /** Ring granted less than reading everything, so the homeserver was not asked: it reports an account only to a grant that reads the root. */
       partialGrant?: boolean;
+      /** Ring granted writing the profile file, and the page holds the session to do it with. */
+      canEditProfile?: boolean;
     }
   | {
       /** Null when the sign-in failed before the homeserver named who approved. */

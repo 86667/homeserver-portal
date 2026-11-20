@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AccountConfig, AccountInfo, AccountRecord, FeedEvent, InviteStatus, Profile } from '../model';
+import type { ProfileEdit } from '../profile';
 import { AccountFlow } from './AccountFlow';
 import { HomeserverClient, type RingRequest } from '../homeserver-client';
 
@@ -45,7 +46,7 @@ const ALICE_ACCOUNT: AccountRecord = {
 function homeserver({
   inviteRequired = true,
   inviteStatus = () => 'valid',
-  account = () => Promise.resolve({ pubky: ALICE, hasAccount: true }),
+  account = () => Promise.resolve({ pubky: ALICE, hasAccount: true, canEditProfile: true }),
   profile = { name: 'Alice', bio: 'Hi there', status: null, links: [], avatar: null },
   events = [feedEvent('PUT', BOB, 'site/index.html'), feedEvent('PUT', ALICE, 'pubky.app/profile.json')],
 }: FakeHomeserver = {}) {
@@ -57,6 +58,9 @@ function homeserver({
       async (): Promise<RingRequest> => ({ authUrl: 'pubkyauth://signup?secret=s', awaitAccount: () => account() }),
     ),
     profile: vi.fn(async (pubky: string) => (pubky === ALICE ? profile : null)),
+    saveProfile: vi.fn(async (_edit: ProfileEdit): Promise<void> => undefined),
+    signOut: vi.fn(async () => undefined),
+    restoreSignIn: vi.fn(async (): Promise<AccountInfo | null> => null),
     ownEvents: vi.fn(async (pubky: string, cursor: string | null, _limit: number, path = '') => {
       const mine = events.filter((e) => e.pubky === pubky && e.path.startsWith(path)).reverse();
       return cursor === null ? { events: mine, cursor: '1' } : { events: [], cursor: null };
@@ -435,11 +439,75 @@ describe('AccountFlow signed-in details', () => {
     expect(client.profile).toHaveBeenCalledWith(ALICE);
   });
 
-  it('says so when there is no profile', async () => {
-    homeserver({ profile: null });
+  it('says so when there is no profile, and offers to create one', async () => {
+    const client = homeserver({ profile: null });
     renderOnAccount();
     fireEvent.click(await screen.findByTestId('account-signin'));
     await screen.findByTestId('profile-none');
+    fireEvent.click(screen.getByRole('button', { name: 'Create a profile' }));
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Alice' } });
+    fireEvent.click(screen.getByTestId('profile-save'));
+    expect((await screen.findByTestId('profile-name')).textContent).toBe('Alice');
+    expect(client.saveProfile).toHaveBeenCalledWith({ name: 'Alice', bio: '', status: '', links: [] });
+  });
+
+  it('edits the profile: name, bio and links, trimmed, and shows what was saved', async () => {
+    const client = homeserver();
+    renderOnAccount();
+    fireEvent.click(await screen.findByTestId('account-signin'));
+    fireEvent.click(await screen.findByTestId('profile-edit'));
+    expect((screen.getByLabelText('Bio') as HTMLTextAreaElement).value).toBe('Hi there');
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: '  Alicia ' } });
+    fireEvent.click(screen.getByTestId('profile-add-link'));
+    fireEvent.change(screen.getByLabelText('Link 1 title'), { target: { value: 'Site' } });
+    fireEvent.change(screen.getByLabelText('Link 1 address'), { target: { value: 'https://alice.example' } });
+    fireEvent.click(screen.getByTestId('profile-add-link')); // left blank, so not saved
+    fireEvent.click(screen.getByTestId('profile-save'));
+    expect((await screen.findByTestId('profile-name')).textContent).toBe('Alicia');
+    expect(client.saveProfile).toHaveBeenCalledWith({
+      name: 'Alicia',
+      bio: 'Hi there',
+      status: '',
+      links: [{ title: 'Site', url: 'https://alice.example/' }],
+    });
+    expect(screen.getByRole('link', { name: 'Site' })).toBeTruthy();
+    expect(screen.queryByTestId('profile-editor')).toBeNull();
+  });
+
+  it('does not save an edit pubky.app would refuse, and says what is wrong', async () => {
+    const client = homeserver();
+    renderOnAccount();
+    fireEvent.click(await screen.findByTestId('account-signin'));
+    fireEvent.click(await screen.findByTestId('profile-edit'));
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Al' } });
+    fireEvent.click(screen.getByTestId('profile-add-link'));
+    fireEvent.change(screen.getByLabelText('Link 1 title'), { target: { value: 'Site' } });
+    fireEvent.change(screen.getByLabelText('Link 1 address'), { target: { value: 'alice.example' } });
+    fireEvent.click(screen.getByTestId('profile-save'));
+    expect(screen.getByTestId('profile-name-error').textContent).toMatch(/3 to 50/);
+    expect(screen.getByTestId('profile-links-error').textContent).toMatch(/not a full address/);
+    expect(client.saveProfile).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId('profile-cancel'));
+    expect((await screen.findByTestId('profile-name')).textContent).toBe('Alice');
+  });
+
+  it('keeps the editor open with the reason when the homeserver refuses the save', async () => {
+    const client = homeserver();
+    client.saveProfile.mockRejectedValue(new Error('over quota'));
+    renderOnAccount();
+    fireEvent.click(await screen.findByTestId('account-signin'));
+    fireEvent.click(await screen.findByTestId('profile-edit'));
+    fireEvent.click(screen.getByTestId('profile-save'));
+    expect((await screen.findByTestId('profile-save-failed')).textContent).toMatch(/over quota/);
+    expect((screen.getByTestId('profile-save') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('offers no editing when Ring did not grant writing the profile', async () => {
+    homeserver({ account: () => Promise.resolve({ pubky: ALICE, hasAccount: true }) });
+    renderOnAccount();
+    fireEvent.click(await screen.findByTestId('account-signin'));
+    await screen.findByTestId('profile-name');
+    expect(screen.queryByTestId('profile-edit')).toBeNull();
   });
 
   it('lets the welcome be dismissed, keeping the account below it', async () => {
@@ -460,14 +528,27 @@ describe('AccountFlow signed-in details', () => {
     expect(screen.queryByTestId('profile-card')).toBeNull();
   });
 
-  it('removes the profile again on sign-out', async () => {
-    homeserver();
+  it('starts signed in for someone who stayed signed in on this browser', async () => {
+    const client = homeserver();
+    client.restoreSignIn.mockResolvedValue({ pubky: ALICE, hasAccount: true, canEditProfile: true });
+    render(<AccountFlow config={CONFIG} initialCode="" />);
+    expect(await screen.findByTestId('sign-out')).toBeTruthy();
+    expect(screen.getByTestId('tab-activity')).toBeTruthy();
+    fireEvent.mouseDown(screen.getByTestId('tab-account'));
+    expect(await screen.findByText('Welcome back')).toBeTruthy();
+    expect((await screen.findByTestId('profile-name')).textContent).toBe('Alice');
+    expect(client.startRequest).not.toHaveBeenCalled();
+  });
+
+  it('removes the profile again on sign-out, and revokes the grant', async () => {
+    const client = homeserver();
     renderOnAccount();
     fireEvent.click(await screen.findByTestId('account-signin'));
     await screen.findByTestId('profile-card');
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     await screen.findByTestId('account-signin');
     expect(screen.queryByTestId('profile-card')).toBeNull();
+    expect(client.signOut).toHaveBeenCalled();
   });
 });
 

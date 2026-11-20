@@ -1,13 +1,24 @@
 'use client';
 
-import { ExternalLink, IdCard } from 'lucide-react';
+import { useState } from 'react';
+import { ExternalLink, IdCard, Pencil } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
-import type { ProfileState } from '../useProfile';
+import type { OwnProfile, ProfileState } from '../useProfile';
 import { Avatar } from './Avatar';
+import { ProfileEditor } from './ProfileEditor';
 
-/** The person's pubky.app profile, read from their own public files on this homeserver. */
-export function ProfileCard({ state }: { state: ProfileState }) {
+interface ProfileCardProps {
+  state: ProfileState;
+  /** Saves an edit; null when the page was not granted writing the profile, and so offers no editing. */
+  onSave: OwnProfile['save'] | null;
+}
+
+/** The person's pubky.app profile, read from their own public files on this homeserver, and an editor for it. */
+export function ProfileCard({ state, onSave }: ProfileCardProps) {
+  const [editing, setEditing] = useState(false);
+  const canEdit = onSave !== null && state.status === 'done';
   return (
     <Card data-testid="profile-card">
       <CardHeader>
@@ -21,13 +32,24 @@ export function ProfileCard({ state }: { state: ProfileState }) {
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <ProfileBody state={state} />
+        {canEdit && editing ? (
+          <ProfileEditor profile={state.profile} onSave={onSave} onClose={() => setEditing(false)} />
+        ) : (
+          <div className="space-y-4">
+            <ProfileBody state={state} canEdit={canEdit} />
+            {canEdit && (
+              <Button variant="outline" size="sm" onClick={() => setEditing(true)} data-testid="profile-edit">
+                <Pencil className="size-3" /> {state.profile ? 'Edit profile' : 'Create a profile'}
+              </Button>
+            )}
+          </div>
+        )}
       </CardContent>
     </Card>
   );
 }
 
-function ProfileBody({ state }: { state: ProfileState }) {
+function ProfileBody({ state, canEdit }: { state: ProfileState; canEdit: boolean }) {
   if (state.status === 'idle' || state.status === 'loading') {
     return (
       <div className="flex items-center gap-4" data-testid="profile-loading">
@@ -49,7 +71,9 @@ function ProfileBody({ state }: { state: ProfileState }) {
   if (!state.profile) {
     return (
       <p className="text-xs text-muted-foreground" data-testid="profile-none">
-        No pubky.app profile here yet. Sign in to pubky.app with this pubky and set one up; it will appear here.
+        {canEdit
+          ? 'No profile here yet.'
+          : 'No pubky.app profile here yet. Sign in to pubky.app with this pubky and set one up; it will appear here.'}
       </p>
     );
   }

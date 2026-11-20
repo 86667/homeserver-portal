@@ -11,9 +11,20 @@ const sdk = vi.hoisted(() => {
   const clientFetch = vi.fn();
   const startGrantAuthFlow = vi.fn();
   const publicGet = vi.fn();
+  // The browser's store of saved sign-ins. Not available unless a test says so.
+  const store = {
+    isAvailable: vi.fn(async () => false),
+    save: vi.fn(async () => undefined),
+    list: vi.fn(async (): Promise<{ id: string; homeserver: string }[]> => []),
+    restore: vi.fn(),
+    remove: vi.fn(async () => undefined),
+    clear: vi.fn(async () => undefined),
+  };
+  const GrantAuthFlow = { isDelegationAvailable: false, startDelegated: vi.fn() };
   class Pubky {
     client = { fetch: clientFetch };
     publicStorage = { get: publicGet };
+    browserSessionStore = store;
     startGrantAuthFlow = startGrantAuthFlow;
     static testnet = vi.fn(() => new Pubky());
   }
@@ -21,6 +32,8 @@ const sdk = vi.hoisted(() => {
     clientFetch,
     publicGet,
     startGrantAuthFlow,
+    store,
+    GrantAuthFlow,
     Pubky,
     AuthFlowKind: {
       signup: vi.fn((homeserver: { key: string }, code: string | null) => ({
@@ -53,13 +66,17 @@ function session({
   homeserver = HOMESERVER,
   account = () => Promise.resolve(ACCOUNT),
   signout = vi.fn(async () => undefined),
-  capabilities = [ACCOUNT_CAPABILITY],
+  capabilities = ACCOUNT_CAPABILITY.split(','),
+  getJson = vi.fn(async (): Promise<unknown> => Promise.reject(sdkError(404))),
+  putJson = vi.fn(async () => undefined),
 }: {
   pubky?: string;
   homeserver?: string;
   capabilities?: string[];
   account?: () => Promise<unknown>;
   signout?: () => Promise<void>;
+  getJson?: (path: string) => Promise<unknown>;
+  putJson?: (path: string, body: unknown) => Promise<void>;
 } = {}) {
   return {
     info: { publicKey: { z32: () => pubky } },
@@ -67,6 +84,7 @@ function session({
       sessionInfo: async () => ({ homeserver: { z32: () => homeserver }, capabilities }),
       account,
     },
+    storage: { getJson, putJson },
     signout,
   };
 }
@@ -95,7 +113,20 @@ function homeserver(routes: Record<string, () => Response | Promise<Response>>) 
 
 beforeEach(() => {
   vi.clearAllMocks();
+  sdk.GrantAuthFlow.isDelegationAvailable = false;
+  sdk.store.isAvailable.mockResolvedValue(false);
+  sdk.store.list.mockResolvedValue([]);
 });
+
+/** A browser that can keep a sign-in: the delegated flow resolves with `approved`. */
+function keepingBrowser(approved?: unknown) {
+  sdk.GrantAuthFlow.isDelegationAvailable = true;
+  sdk.store.isAvailable.mockResolvedValue(true);
+  sdk.GrantAuthFlow.startDelegated.mockResolvedValue({
+    authorizationUrl: 'pubkyauth://signin_grant?cpk=k',
+    awaitApproval: () => Promise.resolve(approved),
+  });
+}
 
 afterEach(() => {
   vi.useRealTimers();
@@ -176,13 +207,14 @@ describe('startRequest', () => {
     );
   });
 
-  it('reads the account through the session, then revokes the grant', async () => {
+  it('reads the account through the session, and keeps the grant until sign-out', async () => {
     const signout = vi.fn(async () => undefined);
     flow(session({ signout }));
     const client = await HomeserverClient.connect(config);
     await expect((await client.startRequest('signin', null)).awaitAccount()).resolves.toEqual({
       pubky: ALICE,
       hasAccount: true,
+      canEditProfile: true,
       account: {
         createdAt: new Date('2026-10-22T10:11:12.123Z'),
         disabled: false,
@@ -190,6 +222,29 @@ describe('startRequest', () => {
         quota: { effective: { storageQuotaMb: 500, rateRead: '100mb/m', rateWrite: 'unlimited' }, overrides: {} },
       },
     });
+    expect(signout).not.toHaveBeenCalled();
+    await client.signOut();
+    await client.signOut();
+    expect(signout).toHaveBeenCalledTimes(1);
+  });
+
+  it('revokes the grant at once when Ring did not grant writing the profile', async () => {
+    const signout = vi.fn(async () => undefined);
+    flow(session({ signout, capabilities: ['/:r'] }));
+    const client = await HomeserverClient.connect(config);
+    await expect((await client.startRequest('signin', null)).awaitAccount()).resolves.toMatchObject({
+      hasAccount: true,
+      canEditProfile: false,
+    });
+    expect(signout).toHaveBeenCalledTimes(1);
+  });
+
+  it('revokes the grant it holds before asking Ring for another', async () => {
+    const signout = vi.fn(async () => undefined);
+    flow(session({ signout }));
+    const client = await HomeserverClient.connect(config);
+    await (await client.startRequest('signin', null)).awaitAccount();
+    await client.startRequest('signin', null);
     expect(signout).toHaveBeenCalledTimes(1);
   });
 
@@ -201,6 +256,7 @@ describe('startRequest', () => {
       await expect((await client.startRequest('signin', null)).awaitAccount()).resolves.toEqual({
         pubky: ALICE,
         hasAccount: true,
+        canEditProfile: true,
       });
     }
   });
@@ -213,6 +269,7 @@ describe('startRequest', () => {
       pubky: ALICE,
       hasAccount: true,
       partialGrant: true,
+      canEditProfile: true,
     });
     expect(account).not.toHaveBeenCalled();
   });
@@ -266,13 +323,18 @@ describe('startRequest', () => {
     await expect((await client.startRequest('signin', null)).awaitAccount()).rejects.toThrow('grant expired');
   });
 
-  it('still reports the account when revoking the grant fails', async () => {
-    flow(session({ signout: vi.fn(async () => Promise.reject(new TypeError('blocked'))) }));
+  it('still reports the account, and still signs out, when revoking the grant fails', async () => {
+    const signout = vi.fn(async () => Promise.reject(new TypeError('blocked')));
+    flow(session({ signout, capabilities: ['/:r'] }));
     const client = await HomeserverClient.connect(config);
     await expect((await client.startRequest('signin', null)).awaitAccount()).resolves.toMatchObject({
       pubky: ALICE,
       hasAccount: true,
     });
+    flow(session({ signout }));
+    await (await client.startRequest('signin', null)).awaitAccount();
+    await expect(client.signOut()).resolves.toBeUndefined();
+    expect(signout).toHaveBeenCalledTimes(2);
   });
 
   it('gives up waiting for Ring after ten minutes', async () => {
@@ -299,6 +361,170 @@ describe('startRequest', () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     process.off('unhandledRejection', unhandled);
     expect(unhandled).not.toHaveBeenCalled();
+  });
+});
+
+describe('staying signed in', () => {
+  it('asks Ring through a delegated flow and saves the session it keeps', async () => {
+    const approved = session();
+    keepingBrowser(approved);
+    const client = await HomeserverClient.connect(config);
+    const request = await client.startRequest('signin', null);
+    expect(request.authUrl).toBe('pubkyauth://signin_grant?cpk=k');
+    expect(sdk.GrantAuthFlow.startDelegated).toHaveBeenCalledWith(
+      ACCOUNT_CAPABILITY,
+      { kind: 'signin' },
+      { clientId: 'localhost', relay: config.relay },
+    );
+    expect(sdk.startGrantAuthFlow).not.toHaveBeenCalled();
+    await request.awaitAccount();
+    expect(sdk.store.save).toHaveBeenCalledWith(approved);
+  });
+
+  it('saves nothing for a session it does not keep, and still signs in when saving fails', async () => {
+    keepingBrowser(session({ homeserver: OTHER_HOMESERVER }));
+    const client = await HomeserverClient.connect(config);
+    await (await client.startRequest('signin', null)).awaitAccount();
+    expect(sdk.store.save).not.toHaveBeenCalled();
+
+    keepingBrowser(session());
+    sdk.store.save.mockRejectedValueOnce(new Error('quota'));
+    await expect((await client.startRequest('signin', null)).awaitAccount()).resolves.toMatchObject({
+      canEditProfile: true,
+    });
+  });
+
+  it('uses the plain flow on a testnet, and where the browser cannot keep a key', async () => {
+    keepingBrowser(session());
+    flow(session());
+    const testnet = await HomeserverClient.connect({ ...config, testnetHost: '10.0.0.2' });
+    await testnet.startRequest('signin', null);
+    sdk.store.isAvailable.mockResolvedValue(false);
+    const client = await HomeserverClient.connect(config);
+    await (await client.startRequest('signin', null)).awaitAccount();
+    expect(sdk.GrantAuthFlow.startDelegated).not.toHaveBeenCalled();
+    expect(sdk.startGrantAuthFlow).toHaveBeenCalledTimes(2);
+    expect(sdk.store.save).not.toHaveBeenCalled();
+    await expect(client.restoreSignIn()).resolves.toBeNull();
+  });
+
+  it('restores the saved sign-in for this homeserver, ready to save a profile', async () => {
+    keepingBrowser();
+    const putJson = vi.fn(async () => undefined);
+    sdk.store.list.mockResolvedValue([
+      { id: 'elsewhere', homeserver: OTHER_HOMESERVER },
+      { id: 'here', homeserver: HOMESERVER },
+    ]);
+    sdk.store.restore.mockResolvedValue(session({ putJson }));
+    const client = await HomeserverClient.connect(config);
+    await expect(client.restoreSignIn()).resolves.toMatchObject({
+      pubky: ALICE,
+      hasAccount: true,
+      canEditProfile: true,
+      account: { usedBytes: 30 * 1024 },
+    });
+    expect(sdk.store.restore).toHaveBeenCalledWith('here');
+    await client.saveProfile({ name: 'Alice', bio: '', status: '', links: [] });
+    expect(putJson).toHaveBeenCalled();
+  });
+
+  it('is nobody when nothing was saved', async () => {
+    keepingBrowser();
+    const client = await HomeserverClient.connect(config);
+    await expect(client.restoreSignIn()).resolves.toBeNull();
+    expect(sdk.store.restore).not.toHaveBeenCalled();
+  });
+
+  it('forgets a saved sign-in the homeserver no longer honours', async () => {
+    keepingBrowser();
+    sdk.store.list.mockResolvedValue([{ id: 'here', homeserver: HOMESERVER }]);
+    const refusals = [
+      Object.assign(new Error('Browser session is no longer valid.'), { name: 'ClientStateError' }),
+      sdkError(401),
+    ];
+    for (const refusal of refusals) {
+      sdk.store.restore.mockRejectedValueOnce(refusal);
+      const client = await HomeserverClient.connect(config);
+      await expect(client.restoreSignIn()).resolves.toBeNull();
+    }
+    expect(sdk.store.remove).toHaveBeenCalledTimes(2);
+    expect(sdk.store.remove).toHaveBeenCalledWith('here');
+  });
+
+  it('keeps a saved sign-in it could not check, for the next visit', async () => {
+    keepingBrowser();
+    sdk.store.list.mockResolvedValue([{ id: 'here', homeserver: HOMESERVER }]);
+    sdk.store.restore.mockRejectedValue(new TypeError('Failed to fetch'));
+    const client = await HomeserverClient.connect(config);
+    await expect(client.restoreSignIn()).resolves.toBeNull();
+    sdk.store.list.mockRejectedValue(new Error('storage blocked'));
+    await expect(client.restoreSignIn()).resolves.toBeNull();
+    expect(sdk.store.remove).not.toHaveBeenCalled();
+  });
+
+  it('forgets the saved sign-in on sign-out, and revokes its grant', async () => {
+    const signout = vi.fn(async () => undefined);
+    keepingBrowser(session({ signout }));
+    const client = await HomeserverClient.connect(config);
+    await (await client.startRequest('signin', null)).awaitAccount();
+    await client.signOut();
+    expect(signout).toHaveBeenCalledTimes(1);
+    expect(sdk.store.clear).toHaveBeenCalled();
+  });
+});
+
+describe('saveProfile', () => {
+  const edit = { name: 'Alice', bio: '', status: 'around', links: [{ title: 'Site', url: 'https://alice.example/' }] };
+
+  it('replaces the edited parts of the stored profile and keeps the rest', async () => {
+    const putJson = vi.fn(async () => undefined);
+    const stored = { name: 'Al', bio: 'old', image: 'pubky://x/pub/pubky.app/files/1', extra: 1 };
+    flow(session({ getJson: async () => stored, putJson }));
+    const client = await HomeserverClient.connect(config);
+    await (await client.startRequest('signin', null)).awaitAccount();
+    await client.saveProfile(edit);
+    expect(putJson).toHaveBeenCalledWith('/pub/pubky.app/profile.json', {
+      name: 'Alice',
+      bio: null,
+      status: 'around',
+      links: edit.links,
+      image: 'pubky://x/pub/pubky.app/files/1',
+      extra: 1,
+    });
+  });
+
+  it('writes a first profile when there is none, or the stored one is not a profile at all', async () => {
+    for (const getJson of [undefined, async () => ['not', 'a', 'profile']]) {
+      const putJson = vi.fn(async () => undefined);
+      flow(session({ ...(getJson && { getJson }), putJson }));
+      const client = await HomeserverClient.connect(config);
+      await (await client.startRequest('signin', null)).awaitAccount();
+      await client.saveProfile(edit);
+      expect(putJson).toHaveBeenCalledWith('/pub/pubky.app/profile.json', {
+        name: 'Alice',
+        bio: null,
+        status: 'around',
+        links: edit.links,
+      });
+    }
+  });
+
+  it('does not write over a profile it could not read', async () => {
+    const putJson = vi.fn(async () => undefined);
+    flow(session({ getJson: async () => Promise.reject(sdkError(500, 'database down')), putJson }));
+    const client = await HomeserverClient.connect(config);
+    await (await client.startRequest('signin', null)).awaitAccount();
+    await expect(client.saveProfile(edit)).rejects.toThrow('database down');
+    expect(putJson).not.toHaveBeenCalled();
+  });
+
+  it('refuses once signed out', async () => {
+    flow(session());
+    const client = await HomeserverClient.connect(config);
+    await expect(client.saveProfile(edit)).rejects.toThrow(/signed out/);
+    await (await client.startRequest('signin', null)).awaitAccount();
+    await client.signOut();
+    await expect(client.saveProfile(edit)).rejects.toThrow(/signed out/);
   });
 });
 

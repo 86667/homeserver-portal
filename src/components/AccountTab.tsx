@@ -4,7 +4,7 @@ import { UserRound } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import type { useAccountFlow } from '../useAccountFlow';
-import type { ProfileState } from '../useProfile';
+import type { OwnProfile } from '../useProfile';
 import { describeOutcome } from '../outcome';
 import { AccountDetails } from './AccountDetails';
 import { ErrorPanel } from './ErrorPanel';
@@ -14,12 +14,12 @@ import { WaitingStep } from './WaitingStep';
 
 interface AccountTabProps {
   flow: ReturnType<typeof useAccountFlow>;
-  profile: ProfileState;
+  profile: OwnProfile;
 }
 
 /** The account tab: the sign-up/sign-in card, and once signed in, the person's profile. */
 export function AccountTab({ flow, profile }: AccountTabProps) {
-  const signedIn = flow.step.name === 'done' && flow.step.info.hasAccount;
+  const account = flow.step.name === 'done' && flow.step.info.hasAccount ? flow.step.info : null;
   return (
     <>
       <Card data-testid="account">
@@ -34,7 +34,7 @@ export function AccountTab({ flow, profile }: AccountTabProps) {
           <Steps flow={flow} />
         </CardContent>
       </Card>
-      {signedIn && <ProfileCard state={profile} />}
+      {account && <ProfileCard state={profile.state} onSave={account.canEditProfile ? profile.save : null} />}
     </>
   );
 }

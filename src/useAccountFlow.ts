@@ -36,7 +36,9 @@ export function useAccountFlow(config: AccountConfig, initialCode: string) {
       const connected = await HomeserverClient.connect(config);
       setInviteRequired(await connected.isInviteRequired());
       setClient(connected);
-      setStep({ name: 'start' });
+      // Someone who stayed signed in on this browser starts where they left off.
+      const info = await connected.restoreSignIn();
+      setStep(info ? { name: 'done', kind: 'signin', info } : { name: 'start' });
     } catch (error) {
       setStep({ name: 'unavailable', message: messageOf(error) });
     }
@@ -53,10 +55,12 @@ export function useAccountFlow(config: AccountConfig, initialCode: string) {
   const { recheck } = invite;
   const backToStart = useCallback(() => {
     attempt.current += 1;
+    // Signing out: the grant the page held for the profile editor is revoked.
+    void client?.signOut();
     // A sign-up may just have spent the code.
     recheck();
     setStep({ name: 'start' });
-  }, [recheck]);
+  }, [client, recheck]);
 
   // A code goes with the sign-up only when the homeserver accepted it; with
   // codes not required (said up front, or in answer to a code) none is sent.

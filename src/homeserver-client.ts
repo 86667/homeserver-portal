@@ -8,7 +8,15 @@
  * This is the only module that loads the Pubky SDK. It is loaded on demand in
  * the browser: it is large, and its Node build must never run in the server.
  */
-import type { AccountInfo as SdkAccount, Capabilities, GrantSession, Pubky, Session } from '@synonymdev/pubky';
+import type {
+  AccountInfo as SdkAccount,
+  AuthFlowKind,
+  Capabilities,
+  GrantAuthFlowOptions,
+  GrantSession,
+  Pubky,
+  Session,
+} from '@synonymdev/pubky';
 import { parseHomeserverTime } from './account';
 import { parseEventStream } from './activity';
 import {
@@ -20,10 +28,13 @@ import {
   type InviteStatus,
   type Profile,
   ACCOUNT_CAPABILITY,
+  PROFILE_PATH,
   readsRoot,
+  writesProfile,
   type SignedRecord,
 } from './model';
 import { parseSignedRecord } from './pkarr';
+import { type ProfileEdit, mergeProfile } from './profile';
 import { withTimeout } from './with-timeout';
 
 type Sdk = typeof import('@synonymdev/pubky');
@@ -57,6 +68,11 @@ const PKARR_RELAY = 'https://pkarr.pubky.app';
 const TESTNET_PKARR_PORT = 15411;
 
 export class HomeserverClient {
+  /** The signed-in person's session, kept to write their profile with; null when nobody is signed in. */
+  private session: Session | null = null;
+  /** Whether this browser can keep a sign-in across visits; found out once, on first need. */
+  private keepsSignIn: Promise<boolean> | null = null;
+
   private constructor(
     private readonly sdk: Sdk,
     private readonly pubky: Pubky,
@@ -89,14 +105,11 @@ export class HomeserverClient {
 
   /** Starts a Ring request; `inviteCode` only for a sign-up on a homeserver that needs one. */
   async startRequest(kind: RingRequestKind, inviteCode: string | null): Promise<RingRequest> {
-    const flow = await this.pubky.startGrantAuthFlow(
-      ACCOUNT_CAPABILITY as Capabilities,
-      this.flowKind(kind, inviteCode),
-      {
-        clientId: clientId(),
-        relay: this.config.relay,
-      },
-    );
+    await this.signOut();
+    const flow = await this.startFlow(ACCOUNT_CAPABILITY as Capabilities, this.flowKind(kind, inviteCode), {
+      clientId: clientId(),
+      relay: this.config.relay,
+    });
     const account = flow.awaitApproval().then(
       (session) => this.confirmAccount(session),
       (error: unknown) => noAccountOf(error),
@@ -109,6 +122,31 @@ export class HomeserverClient {
     };
   }
 
+  /**
+   * A grant flow whose session can be kept across visits where the browser
+   * allows: a "delegated" one, signed for with a key the browser holds and
+   * script cannot copy out. Elsewhere a plain flow, whose session lasts until
+   * the page is closed and is never saved.
+   */
+  private async startFlow(capabilities: Capabilities, kind: AuthFlowKind, options: GrantAuthFlowOptions) {
+    return (await this.canKeepSignIn())
+      ? this.sdk.GrantAuthFlow.startDelegated(capabilities, kind, options)
+      : this.pubky.startGrantAuthFlow(capabilities, kind, options);
+  }
+
+  /**
+   * Whether a sign-in can outlast the page here: the browser must hold keys
+   * and a store for them. Never on a testnet, which only the SDK's facade
+   * knows how to reach, and the delegated flow starts without it.
+   */
+  private canKeepSignIn(): Promise<boolean> {
+    this.keepsSignIn ??= (async () =>
+      !this.config.testnetHost &&
+      this.sdk.GrantAuthFlow.isDelegationAvailable &&
+      (await this.pubky.browserSessionStore.isAvailable()))().catch(() => false);
+    return this.keepsSignIn;
+  }
+
   private flowKind(kind: RingRequestKind, inviteCode: string | null) {
     const { AuthFlowKind, PublicKey } = this.sdk;
     return kind === 'signup'
@@ -119,29 +157,93 @@ export class HomeserverClient {
   /**
    * Ring's approval opened a session at the person's homeserver: the one
    * their own record names, or, for a sign-up, this one. Reads the account
-   * through it, then revokes the grant: the page keeps no session. A session
-   * at another homeserver means no account here, whatever is there.
+   * through it. A session at another homeserver means no account here,
+   * whatever is there. The session is kept, for the profile editor, only when
+   * the account is here and Ring granted writing the profile; otherwise the
+   * grant is revoked at once. A kept session is also saved in the browser
+   * where it can be, so the next visit starts signed in.
    */
   private async confirmAccount(session: Session): Promise<AccountInfo> {
-    const pubky = session.info.publicKey.z32();
+    let keep = false;
     try {
-      const grant = session.grant;
-      if (!grant) throw new Error('The sign-in did not open a grant session');
-      const info = await grant.sessionInfo();
-      const homeserver = info.homeserver.z32();
-      if (homeserver !== this.config.homeserver) return { pubky, hasAccount: false, otherHomeserver: homeserver };
-      if (!info.capabilities.some(readsRoot)) return { pubky, hasAccount: true, partialGrant: true };
-      const account = await readAccount(grant);
-      return account ? { pubky, hasAccount: true, account } : { pubky, hasAccount: true };
+      const account = await this.readAccountInfo(session);
+      keep = account.hasAccount && account.canEditProfile === true;
+      return account;
     } finally {
-      // Best effort: a grant left behind expires on its own.
-      await session.signout().catch(() => undefined);
+      if (keep) {
+        this.session = session;
+        // Not saved is not a failure: the sign-in then lasts until the page is closed.
+        if (await this.canKeepSignIn()) await this.pubky.browserSessionStore.save(session).catch(() => undefined);
+      } else await revoke(session);
     }
+  }
+
+  /**
+   * The account of whoever stayed signed in on this browser, or null when
+   * nobody did. A saved sign-in the homeserver no longer honours (its grant
+   * was revoked in Ring, or ran out) is forgotten. Never throws: one that
+   * cannot be checked right now is left for the next visit.
+   */
+  async restoreSignIn(): Promise<AccountInfo | null> {
+    if (!(await this.canKeepSignIn())) return null;
+    const store = this.pubky.browserSessionStore;
+    try {
+      const saved = (await store.list()).find((record) => record.homeserver === this.config.homeserver);
+      if (!saved) return null;
+      try {
+        const session = await store.restore(saved.id);
+        const account = await this.readAccountInfo(session);
+        if (!account.hasAccount || !account.canEditProfile) return null;
+        this.session = session;
+        return account;
+      } catch (error) {
+        if (isDeadSignIn(error)) await store.remove(saved.id);
+        return null;
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  private async readAccountInfo(session: Session): Promise<AccountInfo> {
+    const pubky = session.info.publicKey.z32();
+    const grant = session.grant;
+    if (!grant) throw new Error('The sign-in did not open a grant session');
+    const info = await grant.sessionInfo();
+    const homeserver = info.homeserver.z32();
+    if (homeserver !== this.config.homeserver) return { pubky, hasAccount: false, otherHomeserver: homeserver };
+    const canEditProfile = info.capabilities.some(writesProfile);
+    if (!info.capabilities.some(readsRoot)) return { pubky, hasAccount: true, partialGrant: true, canEditProfile };
+    const account = await readAccount(grant);
+    return { pubky, hasAccount: true, canEditProfile, ...(account && { account }) };
+  }
+
+  /** Revokes the signed-in person's grant, if the page holds one, and forgets any saved sign-in. Never throws. */
+  async signOut(): Promise<void> {
+    const session = this.session;
+    this.session = null;
+    if (session) await revoke(session);
+    if (await this.canKeepSignIn()) await this.pubky.browserSessionStore.clear().catch(() => undefined);
+  }
+
+  /**
+   * Writes an edited profile for the signed-in person. The stored file is
+   * read first and only the edited parts replaced, so its picture and whatever
+   * else another app keeps there survive.
+   */
+  async saveProfile(edit: ProfileEdit): Promise<void> {
+    if (!this.session) throw new Error('You are signed out. Sign in again to save your profile.');
+    const storage = this.session.storage;
+    const stored = await storage.getJson(PROFILE_PATH).catch((error: unknown) => {
+      if (statusCodeOf(error) === 404) return {};
+      throw error;
+    });
+    await storage.putJson(PROFILE_PATH, mergeProfile(isRecord(stored) ? stored : {}, edit));
   }
 
   /** The person's pubky.app profile, or null when they have none here. */
   async profile(pubky: string): Promise<Profile | null> {
-    const response = await this.homeserverFetch(`/storage/${pubky}/pub/pubky.app/profile.json`);
+    const response = await this.homeserverFetch(`/storage/${pubky}${PROFILE_PATH}`, { cache: 'no-store' });
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(`The homeserver could not read the profile (${response.status})`);
     const raw = (await response.json()) as Record<string, unknown>;
@@ -242,6 +344,22 @@ async function readAccount(grant: GrantSession): Promise<AccountRecord | undefin
     throw error;
   }
 }
+
+/**
+ * Whether a saved sign-in failed because the homeserver no longer honours it,
+ * not because it could not be asked. The SDK reports a refused restore as a
+ * `ClientStateError`; a refusal met later carries the HTTP status.
+ */
+function isDeadSignIn(error: unknown): boolean {
+  const status = statusCodeOf(error);
+  return (error as { name?: unknown } | null)?.name === 'ClientStateError' || status === 401 || status === 403;
+}
+
+/** Best effort: a grant that could not be revoked stays listed in Ring until it expires. */
+const revoke = (session: Session) => session.signout().catch(() => undefined);
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
 
 function toAccountRecord(account: SdkAccount): AccountRecord {
   return {
