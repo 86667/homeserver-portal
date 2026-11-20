@@ -2,17 +2,16 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AccountConfig, AccountInfo, InviteStatus } from './model';
 import { HomeserverClient, type RingRequestKind } from './homeserver-client';
 import { useInviteCode } from './useInviteCode';
+import { messageOf } from './format';
 
 export type Step =
   | { name: 'connecting' }
   | { name: 'unavailable'; message: string }
   | { name: 'start' }
-  | { name: 'waiting'; kind: RingRequestKind; authUrl: string }
+  | { name: 'waiting'; kind: RingRequestKind; authUrl: string; staysSignedIn: boolean }
   | { name: 'checking' }
   | { name: 'done'; kind: RingRequestKind; info: AccountInfo; inviteStatus?: InviteStatus }
   | { name: 'failed'; message: string };
-
-const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /**
  * The portal's steps: connect to the homeserver, then sign up or sign
@@ -36,7 +35,9 @@ export function useAccountFlow(config: AccountConfig, initialCode: string) {
       const connected = await HomeserverClient.connect(config);
       setInviteRequired(await connected.isInviteRequired());
       setClient(connected);
-      setStep({ name: 'start' });
+      // Someone who stayed signed in on this browser starts where they left off.
+      const info = await connected.restoreSignIn();
+      setStep(info ? { name: 'done', kind: 'signin', info } : { name: 'start' });
     } catch (error) {
       setStep({ name: 'unavailable', message: messageOf(error) });
     }
@@ -53,10 +54,12 @@ export function useAccountFlow(config: AccountConfig, initialCode: string) {
   const { recheck } = invite;
   const backToStart = useCallback(() => {
     attempt.current += 1;
+    // Signing out: the grant the page held for the profile editor is revoked.
+    void client?.signOut();
     // A sign-up may just have spent the code.
     recheck();
     setStep({ name: 'start' });
-  }, [recheck]);
+  }, [client, recheck]);
 
   // A code goes with the sign-up only when the homeserver accepted it; with
   // codes not required (said up front, or in answer to a code) none is sent.
@@ -72,7 +75,7 @@ export function useAccountFlow(config: AccountConfig, initialCode: string) {
       try {
         const request = await client.startRequest(kind, inviteCode);
         if (!current()) return;
-        setStep({ name: 'waiting', kind, authUrl: request.authUrl });
+        setStep({ name: 'waiting', kind, authUrl: request.authUrl, staysSignedIn: request.staysSignedIn });
 
         const info = await request.awaitAccount();
         if (!current()) return;

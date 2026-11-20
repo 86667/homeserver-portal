@@ -1,16 +1,16 @@
 /**
- * The homeserver's public event feed, made readable. The feed (`GET /events/`)
- * is one line per public file written or removed, oldest first, with no
- * dates: `PUT pubky://<user>/pub/<path>` or `DEL …`, then `cursor: <id>`.
+ * A person's own public changes, made readable: the events the homeserver's
+ * stream (`GET /events-stream`) reports for them, one per public file written
+ * or removed, with no dates.
  */
 import type { FeedEvent } from './model';
 
-/** A run of changes one person made in one app, as the feed shows them. */
+/** A run of consecutive changes in one folder. */
 export type Burst = {
-  /** The feed's position of the burst's newest event: unique and increasing. */
+  /** Where the burst's newest event is in the list, counted from the newest: stable as older events are added. */
   id: number;
-  pubky: string;
-  app: string;
+  /** The folder under `/pub/` the run's files are in; '' for the top level. */
+  folder: string;
   /** Newest first. */
   events: FeedEvent[];
   /** Files written (new or changed) and removed. */
@@ -18,76 +18,46 @@ export type Burst = {
   removed: number;
 };
 
-/** The events on a page of the feed, and the cursor to ask for what follows (null when the page was empty). */
-export function parseFeed(text: string): { events: FeedEvent[]; cursor: string | null } {
-  const events: FeedEvent[] = [];
-  let cursor: string | null = null;
-  for (const raw of text.split('\n')) {
-    const line = raw.trim();
-    if (line.startsWith('cursor: ')) {
-      cursor = line.slice('cursor: '.length).trim();
-      continue;
-    }
-    const event = parseEvent(line);
-    if (event) events.push(event);
-  }
-  return { events, cursor };
-}
-
 function parseEvent(line: string): FeedEvent | null {
   const match = /^(PUT|DEL) (pubky:\/\/([^/]+)\/pub\/(.*))$/.exec(line);
   if (!match) return null;
   const [, kind, url, pubky, path] = match;
-  return {
-    kind: kind as FeedEvent['kind'],
-    url,
-    pubky,
-    path,
-    app: path.includes('/') ? path.slice(0, path.indexOf('/')) : '',
-  };
+  return { kind: kind as FeedEvent['kind'], url, pubky, path };
 }
 
-/**
- * Consecutive events by the same person in the same app, as one burst each,
- * newest first. `events` is a window of the feed in feed order, and `offset`
- * the window's position in it, so ids stay stable as the window grows.
- */
-export function groupBursts(events: FeedEvent[], offset = 0): Burst[] {
+/** The folder a file is in, under `/pub/`; '' for a file at the top level. */
+export const folderOf = (event: FeedEvent): string => event.path.slice(0, Math.max(0, event.path.lastIndexOf('/')));
+
+/** Consecutive events in the same folder, as one burst each. `events` and the bursts are newest first. */
+export function groupBursts(events: FeedEvent[]): Burst[] {
   const bursts: Burst[] = [];
   events.forEach((event, index) => {
-    const last = bursts[bursts.length - 1];
-    if (last && last.pubky === event.pubky && last.app === event.app) {
-      last.events.unshift(event);
-      last.id = offset + index;
-    } else {
-      bursts.push({ id: offset + index, pubky: event.pubky, app: event.app, events: [event], written: 0, removed: 0 });
+    const folder = folderOf(event);
+    let burst = bursts[bursts.length - 1];
+    if (burst?.folder !== folder) {
+      burst = { id: index, folder, events: [], written: 0, removed: 0 };
+      bursts.push(burst);
     }
-    const burst = bursts[bursts.length - 1];
+    burst.events.push(event);
     if (event.kind === 'PUT') burst.written += 1;
     else burst.removed += 1;
   });
-  return bursts.reverse();
+  return bursts;
 }
 
-/** Who appears in the events and how often, most recently active first; likewise which apps. */
-export function summarizeActivity(events: FeedEvent[]): {
-  people: { pubky: string; changes: number }[];
-  apps: { app: string; changes: number }[];
-} {
-  const people = new Map<string, number>();
-  const apps = new Map<string, number>();
-  for (const event of events) {
-    // Re-inserting moves the key to the end, so the newest comes last.
-    const changes = (people.get(event.pubky) ?? 0) + 1;
-    people.delete(event.pubky);
-    people.set(event.pubky, changes);
-    apps.set(event.app, (apps.get(event.app) ?? 0) + 1);
-  }
-  return {
-    people: [...people.entries()].reverse().map(([pubky, changes]) => ({ pubky, changes })),
-    apps: [...apps.entries()].map(([app, changes]) => ({ app, changes })).sort((a, b) => b.changes - a.changes),
-  };
+/** The folders the events' files are in and how many changes each saw, busiest first. */
+export function summarizeFolders(events: FeedEvent[]): { folder: string; changes: number }[] {
+  const folders = new Map<string, number>();
+  for (const event of events) folders.set(folderOf(event), (folders.get(folderOf(event)) ?? 0) + 1);
+  return [...folders.entries()].map(([folder, changes]) => ({ folder, changes })).sort((a, b) => b.changes - a.changes);
 }
+
+/** A path as someone types it ("/pub/site/", "site") as the path under `/pub/` it names ("site"). */
+export const pathUnderPub = (typed: string): string =>
+  typed
+    .trim()
+    .replace(/^\/pub(\/|$)/, '')
+    .replace(/^\/+|\/+$/g, '');
 
 /**
  * One person's events as `GET /events-stream` sends them in batch mode: SSE

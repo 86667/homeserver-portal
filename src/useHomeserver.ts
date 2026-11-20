@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { HomeserverClient } from './homeserver-client';
 import type { HomeserverInfo, SignedRecord } from './model';
+import { messageOf } from './format';
 
 type Loaded<T> = { status: 'loading' } | { status: 'done'; value: T } | { status: 'failed'; message: string };
 
@@ -35,5 +36,3 @@ export function useHomeserver(client: HomeserverClient | null, enabled: boolean)
 
   return state;
 }
-
-const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));

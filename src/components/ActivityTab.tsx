@@ -1,94 +1,70 @@
 'use client';
 
-import { Activity as ActivityIcon, FileMinus, FilePen, RefreshCw, Users } from 'lucide-react';
+import { type FormEvent, useState } from 'react';
+import { Activity as ActivityIcon, FileMinus, FilePen, Folder, RefreshCw, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
+import { cn } from '@/lib/utils';
 import type { Burst } from '../activity';
-import { formatDateTime, shortPubky } from '../format';
-import type { FeedEvent } from '../model';
-import type { Activity } from '../useActivity';
-import type { OwnActivity } from '../useOwnActivity';
-import { Avatar } from './Avatar';
+import { formatDateTime } from '../format';
+import { OWN_PAGE, type OwnActivity } from '../useOwnActivity';
 
-interface ActivityTabProps {
-  /** The signed-in account holder's pubky; null shows the sign-in prompt instead. */
-  you: string | null;
-  own: OwnActivity;
-  everyone: Activity;
-  /** Whether the homeserver-wide view was asked for. */
-  showAll: boolean;
-  onShowAll: () => void;
-  onGoToAccount: () => void;
-  /** The page is not set up: nothing can be shown. */
-  notSetUp?: React.ReactNode;
+/** A signed-in person's own recent public changes. */
+export function ActivityTab({ own }: { own: OwnActivity }) {
+  return (
+    <Card data-testid="activity-tab">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base sm:text-lg">
+          <ActivityIcon className="size-5" />
+          Your activity
+        </CardTitle>
+        <CardDescription className="text-xs sm:text-sm">
+          Your public changes on this homeserver, newest first: files written and removed, by folder. Changes to private
+          files are not shown.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {/* Keyed by the filter, so choosing a folder below also fills the box. */}
+        <PathFilter key={own.path} path={own.path} onFilter={own.filterBy} />
+        {/* What is on show dims while a newer read is under way, and is swapped in place when it answers. */}
+        <div
+          className={cn('transition-opacity duration-200', own.refreshing && 'opacity-50')}
+          aria-busy={own.refreshing}
+        >
+          <OwnBody own={own} />
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
-/** A signed-in person's own recent changes, and on request everyone's. */
-export function ActivityTab({ you, own, everyone, showAll, onShowAll, onGoToAccount, notSetUp }: ActivityTabProps) {
-  if (notSetUp || !you) {
-    return (
-      <Card data-testid="activity-tab">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base sm:text-lg">
-            <ActivityIcon className="size-5" />
-            Activity
-          </CardTitle>
-          <CardDescription className="text-xs sm:text-sm">
-            Your recent changes on this homeserver, and what everyone else has been up to.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {notSetUp ?? (
-            <div className="space-y-3" data-testid="activity-signin">
-              <p className="text-sm text-muted-foreground">Sign in with Pubky Ring to see activity.</p>
-              <Button variant="outline" onClick={onGoToAccount}>
-                Go to Account
-              </Button>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-    );
-  }
+function PathFilter({ path, onFilter }: { path: string; onFilter: (path: string) => void }) {
+  const [typed, setTyped] = useState(path);
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    onFilter(typed);
+  };
   return (
-    <>
-      <Card data-testid="activity-tab">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base sm:text-lg">
-            <ActivityIcon className="size-5" />
-            Your activity
-          </CardTitle>
-          <CardDescription className="text-xs sm:text-sm">
-            Your newest public changes on this homeserver, from its event feed: files written and removed. Private files
-            never appear in it.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <OwnBody own={own} />
-        </CardContent>
-      </Card>
-      <Card data-testid="activity-everyone">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base sm:text-lg">
-            <Users className="size-5" />
-            Everyone&apos;s activity
-          </CardTitle>
-          <CardDescription className="text-xs sm:text-sm">
-            What people are doing here: public files written and removed, by whom and in which app.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {showAll ? (
-            <EveryoneBody activity={everyone} you={you} />
-          ) : (
-            <Button variant="outline" onClick={onShowAll} data-testid="activity-show-all">
-              See all activity
-            </Button>
-          )}
-        </CardContent>
-      </Card>
-    </>
+    <form onSubmit={submit} className="flex items-center gap-2" data-testid="own-filter">
+      <Input
+        value={typed}
+        onChange={(event) => setTyped(event.target.value)}
+        placeholder="Filter by file or folder, e.g. pubky.app/posts"
+        aria-label="Filter by file or folder"
+        className="font-mono text-xs md:text-xs"
+      />
+      {/* Before "Filter", which then stays where it is when this appears. */}
+      {path && (
+        <Button type="button" variant="ghost" size="sm" onClick={() => onFilter('')} data-testid="own-filter-clear">
+          <X className="size-3" /> Clear
+        </Button>
+      )}
+      <Button type="submit" variant="outline" size="sm">
+        Filter
+      </Button>
+    </form>
   );
 }
 
@@ -96,161 +72,113 @@ function OwnBody({ own }: { own: OwnActivity }) {
   if (own.status === 'idle' || own.status === 'loading') {
     return (
       <div className="space-y-2" data-testid="own-loading">
-        <Skeleton className="h-8 w-full" />
-        <Skeleton className="h-8 w-full" />
-      </div>
-    );
-  }
-  if (own.status === 'failed') {
-    return (
-      <p className="text-xs text-muted-foreground" data-testid="own-failed">
-        Your activity could not be read: {own.message}
-      </p>
-    );
-  }
-  if (own.events.length === 0) {
-    return (
-      <p className="text-xs text-muted-foreground" data-testid="own-none">
-        Nothing yet. Your first public file will show up here.
-      </p>
-    );
-  }
-  return (
-    <div className="space-y-3">
-      <ul className="divide-y rounded-lg border text-xs" data-testid="own-events">
-        {own.events.map((event, index) => (
-          <EventRow key={`${index}-${event.url}`} event={event} />
-        ))}
-      </ul>
-      {own.message && <p className="text-xs text-muted-foreground">Could not load more: {own.message}</p>}
-      {own.more && (
-        <Button variant="outline" size="sm" onClick={own.loadMore} disabled={own.loadingMore} data-testid="own-more">
-          {own.loadingMore ? 'Loading…' : 'Load more'}
-        </Button>
-      )}
-    </div>
-  );
-}
-
-function EventRow({ event }: { event: FeedEvent }) {
-  const Icon = event.kind === 'PUT' ? FilePen : FileMinus;
-  return (
-    <li className="flex items-center gap-3 px-3 py-1.5">
-      <Icon
-        className="size-3 shrink-0 text-muted-foreground"
-        aria-label={event.kind === 'PUT' ? 'written' : 'removed'}
-      />
-      <span className="w-24 shrink-0 truncate text-muted-foreground" title={event.app}>
-        {event.app || '(top level)'}
-      </span>
-      <code className="min-w-0 flex-1 truncate font-mono" title={event.path}>
-        {event.app ? event.path.slice(event.app.length + 1) : event.path}
-      </code>
-    </li>
-  );
-}
-
-function EveryoneBody({ activity, you }: { activity: Activity; you: string }) {
-  const { feed, bursts, people, apps, profiles, refresh } = activity;
-  if (feed.status === 'idle' || feed.status === 'loading') {
-    return (
-      <div className="space-y-2" data-testid="activity-loading">
         <Skeleton className="h-4 w-1/2" />
         <Skeleton className="h-9 w-full" />
         <Skeleton className="h-9 w-full" />
       </div>
     );
   }
-  if (feed.status === 'failed') {
+  if (own.status === 'failed') {
     return (
-      <p className="text-xs text-muted-foreground" data-testid="activity-failed">
-        The activity could not be read: {feed.message}
+      <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground" data-testid="own-failed">
+        Your activity could not be read: {own.message}
+        <RefreshButton own={own} />
       </p>
     );
   }
-  if (feed.events.length === 0) {
+  if (own.events.length === 0) {
     return (
-      <p className="text-xs text-muted-foreground" data-testid="activity-none">
-        Nothing has happened here yet. The first public file someone writes will show up here.
+      <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground" data-testid="own-none">
+        {own.shownPath
+          ? `No public changes of yours at ${own.shownPath}.`
+          : 'Nothing yet. Your first public file will show up here.'}
+        <RefreshButton own={own} />
       </p>
     );
   }
-  const nameOf = (pubky: string) => profiles[pubky]?.name ?? shortPubky(pubky);
   return (
     <div className="space-y-4">
-      <div className="rounded-lg border bg-muted/30 p-3" data-testid="activity-summary">
+      <div className="rounded-lg border bg-muted/30 p-3" data-testid="own-summary">
         <div className="flex flex-wrap items-baseline gap-x-2">
-          <span className="text-2xl font-semibold tabular-nums">{feed.events.length}</span>
+          <span className="text-2xl font-semibold tabular-nums">{own.events.length}</span>
           <span className="text-xs text-muted-foreground">
-            {feed.total === null
-              ? 'most recent changes'
-              : feed.total === feed.events.length
-                ? 'changes, all there are'
-                : `of ${feed.total} changes`}{' '}
-            · {people.length} {people.length === 1 ? 'person' : 'people'} · {apps.length}{' '}
-            {apps.length === 1 ? 'app' : 'apps'}
+            {own.more ? 'newest changes' : 'changes, all there are'}
+            {own.shownPath && ` at ${own.shownPath}`} · {own.folders.length}{' '}
+            {own.folders.length === 1 ? 'folder' : 'folders'}
           </span>
         </div>
         <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-          Read {formatDateTime(feed.checkedAt)}.
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 px-1.5"
-            onClick={refresh}
-            aria-label="Read again"
-            data-testid="activity-refresh"
-          >
-            <RefreshCw className="h-3 w-3" />
-          </Button>
+          {own.checkedAt && `Read ${formatDateTime(own.checkedAt)}.`}
+          <RefreshButton own={own} />
         </p>
       </div>
 
-      <ul className="flex flex-wrap gap-2" data-testid="activity-people" aria-label="People active recently">
-        {people.map(({ pubky, changes }) => (
-          <li
-            key={pubky}
-            className={`flex items-center gap-2 rounded-full border py-1 pr-3 pl-1 text-xs ${pubky === you ? 'border-brand bg-brand/16' : ''}`}
-            title={pubky}
-          >
-            <Avatar image={null} name={nameOf(pubky)} className="size-6 text-xs" />
-            <span className="max-w-40 truncate font-medium">{nameOf(pubky)}</span>
-            {pubky === you && <span className="text-brand">you</span>}
-            <span className="text-muted-foreground tabular-nums">{changes}</span>
-          </li>
-        ))}
+      <ul className="flex flex-wrap gap-2" data-testid="own-folders" aria-label="Folders changed, to filter by">
+        {own.folders.map(({ folder, changes }) => {
+          const chosen = folder !== '' && folder === own.path;
+          return (
+            <li key={folder}>
+              <button
+                type="button"
+                // The top level has no path to ask the homeserver for.
+                disabled={!folder}
+                aria-pressed={chosen}
+                // Choosing the folder that is the filter already takes the filter away.
+                onClick={() => own.filterBy(chosen ? '' : folder)}
+                className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs enabled:hover:bg-muted ${chosen ? 'border-brand bg-brand/16' : ''}`}
+                title={chosen ? 'Remove the filter' : folder ? `Show only ${folder}` : undefined}
+              >
+                <Folder className="size-3 text-muted-foreground" />
+                <span className="max-w-64 truncate font-medium">{folder || '(top level)'}</span>
+                <span className="text-muted-foreground tabular-nums">{changes}</span>
+              </button>
+            </li>
+          );
+        })}
       </ul>
 
-      <ul className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground" data-testid="activity-apps">
-        {apps.map(({ app, changes }) => (
-          <li key={app}>
-            <span className="font-medium text-foreground">{app || '(top level)'}</span> {changes}
-          </li>
-        ))}
-      </ul>
-
-      <ul className="space-y-2" data-testid="activity-bursts">
-        {bursts.map((burst) => (
+      <ul className="max-h-[28rem] space-y-2 overflow-y-auto" data-testid="own-events">
+        {own.bursts.map((burst) => (
           <li key={burst.id}>
-            <BurstRow burst={burst} name={nameOf(burst.pubky)} you={burst.pubky === you} />
+            <BurstRow burst={burst} />
           </li>
         ))}
       </ul>
+      {own.message && <p className="text-xs text-muted-foreground">Could not load more: {own.message}</p>}
+      {own.more && (
+        <Button variant="outline" size="sm" onClick={own.loadMore} disabled={own.loadingMore} data-testid="own-more">
+          {own.loadingMore ? 'Loading…' : `Load ${OWN_PAGE} more`}
+        </Button>
+      )}
     </div>
   );
 }
 
-function BurstRow({ burst, name, you }: { burst: Burst; name: string; you: boolean }) {
+/** Reads the newest page again, from whatever the last read came to. */
+function RefreshButton({ own }: { own: OwnActivity }) {
   return (
-    <details className={`group rounded-lg border ${you ? 'border-brand' : ''}`}>
+    <Button
+      variant="ghost"
+      size="sm"
+      className="h-6 px-1.5"
+      onClick={own.refresh}
+      aria-label="Read again"
+      data-testid="own-refresh"
+    >
+      <RefreshCw className={cn('h-3 w-3', own.refreshing && 'animate-spin')} />
+    </Button>
+  );
+}
+
+/** One burst: its folder and counts, open on its files and able to close. */
+function BurstRow({ burst }: { burst: Burst }) {
+  return (
+    <details className="group rounded-lg border" open>
       <summary className="flex cursor-pointer list-none items-center gap-3 px-3 py-2 text-sm select-none [&::-webkit-details-marker]:hidden">
-        <Avatar image={null} name={name} className="size-7 text-xs" />
-        <span className="min-w-0 flex-1 truncate">
-          <span className="font-medium" title={burst.pubky}>
-            {name}
-          </span>
-          <span className="text-muted-foreground"> in {burst.app || 'the top level'}</span>
-        </span>
+        <Folder className="size-4 shrink-0 text-muted-foreground" />
+        <code className="min-w-0 flex-1 truncate font-mono text-xs" title={burst.folder}>
+          {burst.folder || '(top level)'}
+        </code>
         <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
           {burst.written > 0 && (
             <span className="inline-flex items-center gap-0.5" title={`${burst.written} written`}>
@@ -274,7 +202,7 @@ function BurstRow({ burst, name, you }: { burst: Burst; name: string; you: boole
               <FileMinus className="size-3 shrink-0 text-muted-foreground" aria-label="removed" />
             )}
             <code className="min-w-0 flex-1 truncate font-mono" title={event.path}>
-              {burst.app ? event.path.slice(burst.app.length + 1) : event.path}
+              {burst.folder ? event.path.slice(burst.folder.length + 1) : event.path}
             </code>
           </li>
         ))}

@@ -4,25 +4,22 @@ import { UserRound } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import type { useAccountFlow } from '../useAccountFlow';
-import type { ProfileState } from '../useProfile';
-import type { PublicFiles } from '../usePublicFiles';
+import type { OwnProfile } from '../useProfile';
 import { describeOutcome } from '../outcome';
 import { AccountDetails } from './AccountDetails';
 import { ErrorPanel } from './ErrorPanel';
-import { FilesCard } from './FilesCard';
 import { ProfileCard } from './ProfileCard';
 import { StartStep } from './StartStep';
 import { WaitingStep } from './WaitingStep';
 
 interface AccountTabProps {
   flow: ReturnType<typeof useAccountFlow>;
-  files: PublicFiles;
-  profile: ProfileState;
+  profile: OwnProfile;
 }
 
-/** The account tab: the sign-up/sign-in card, and once signed in, the person's profile and files. */
-export function AccountTab({ flow, files, profile }: AccountTabProps) {
-  const signedIn = flow.step.name === 'done' && flow.step.info.hasAccount;
+/** The account tab: the sign-up/sign-in card, and once signed in, the person's profile. */
+export function AccountTab({ flow, profile }: AccountTabProps) {
+  const account = flow.step.name === 'done' && flow.step.info.hasAccount ? flow.step.info : null;
   return (
     <>
       <Card data-testid="account">
@@ -31,21 +28,18 @@ export function AccountTab({ flow, files, profile }: AccountTabProps) {
             <UserRound className="size-5" />
             Your account
           </CardTitle>
-          <CardDescription>
-            Create a Pubky account on this homeserver, or sign in to yours. Your keys stay in Pubky Ring on your phone.
-          </CardDescription>
+          <CardDescription>Create a Pubky account on this homeserver, or sign in to yours.</CardDescription>
         </CardHeader>
         <CardContent>
           <Steps flow={flow} />
         </CardContent>
       </Card>
-      {signedIn && <ProfileCard state={profile} />}
-      {signedIn && <FilesCard state={files} />}
+      {account && <ProfileCard state={profile.state} onSave={account.canEditProfile ? profile.save : null} />}
     </>
   );
 }
 
-function Steps({ flow }: { flow: ReturnType<typeof useAccountFlow> }) {
+function Steps({ flow }: Pick<AccountTabProps, 'flow'>) {
   const { step, invite, inviteRequired, canSignUp, start, backToStart, retryConnect } = flow;
   switch (step.name) {
     case 'connecting':
@@ -73,7 +67,14 @@ function Steps({ flow }: { flow: ReturnType<typeof useAccountFlow> }) {
         />
       );
     case 'waiting':
-      return <WaitingStep kind={step.kind} authUrl={step.authUrl} onCancel={backToStart} />;
+      return (
+        <WaitingStep
+          kind={step.kind}
+          authUrl={step.authUrl}
+          staysSignedIn={step.staysSignedIn}
+          onCancel={backToStart}
+        />
+      );
     case 'done':
       return (
         <AccountDetails

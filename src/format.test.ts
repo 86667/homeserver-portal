@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatAge, formatBytes, formatDate, formatDateTime, shortPubky } from './format';
+import { formatAge, formatBytes, formatDate, formatDateTime, messageOf } from './format';
 
 describe('formatBytes', () => {
   it.each([
@@ -22,13 +22,6 @@ describe('formatDate', () => {
   });
 });
 
-describe('shortPubky', () => {
-  it('keeps the ends of a key', () => {
-    expect(shortPubky('whgxto9xtroaih7ict9chtuxh1xmbpmci5qd71jsen3ow3bscipy')).toBe('whgxto…cipy');
-    expect(shortPubky('short')).toBe('short');
-  });
-});
-
 describe('formatDateTime', () => {
   it('includes the time', () => {
     expect(formatDateTime(new Date(2026, 9, 21, 14, 28))).toMatch(/2026.*14:28|2:28/);
@@ -41,5 +34,12 @@ describe('formatAge', () => {
     expect(formatAge(60_000)).toBe('1 minute ago');
     expect(formatAge(5 * 3_600_000)).toBe('5 hours ago');
     expect(formatAge(6 * 86_400_000)).toBe('6 days ago');
+  });
+});
+
+describe('messageOf', () => {
+  it("is an error's message, or whatever was thrown as text", () => {
+    expect(messageOf(new Error('offline'))).toBe('offline');
+    expect(messageOf('boom')).toBe('boom');
   });
 });

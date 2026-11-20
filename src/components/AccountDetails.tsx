@@ -1,7 +1,7 @@
 'use client';
 
-import type { ReactNode } from 'react';
-import { Check, CircleCheckBig, Copy, Info } from 'lucide-react';
+import { type ReactNode, useState } from 'react';
+import { Check, CircleCheckBig, Copy, X } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -23,6 +23,7 @@ interface AccountDetailsProps {
 /** The signed-in person's account on this homeserver, or why there is none. */
 export function AccountDetails({ outcome, info, onSignOut }: AccountDetailsProps) {
   const { copiedKey, copy } = useCopyFeedback();
+  const [greeting, setGreeting] = useState(true);
   const pubky = info.pubky === null ? null : `pubky${info.pubky}`;
 
   if (!outcome.hasAccount) {
@@ -44,15 +45,26 @@ export function AccountDetails({ outcome, info, onSignOut }: AccountDetailsProps
 
   return (
     <div className="space-y-4" data-testid="account-details">
-      <div className="rounded-lg border border-brand bg-brand/16 p-4">
-        <div className="flex items-start gap-2">
-          <CircleCheckBig className="mt-0.5 h-4 w-4 shrink-0 text-brand" />
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-foreground">{outcome.title}</p>
-            <p className="text-xs text-muted-foreground">{outcome.text}</p>
+      {greeting && (
+        <div className="rounded-lg border border-brand bg-brand/16 p-4" data-testid="account-greeting">
+          <div className="flex items-start gap-2">
+            <CircleCheckBig className="mt-0.5 h-4 w-4 shrink-0 text-brand" />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium text-foreground">{outcome.title}</p>
+              {outcome.text && <p className="text-xs text-muted-foreground">{outcome.text}</p>}
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="-mt-1 -mr-1 h-7 w-7 shrink-0"
+              onClick={() => setGreeting(false)}
+              aria-label="Dismiss"
+            >
+              <X className="h-4 w-4" />
+            </Button>
           </div>
         </div>
-      </div>
+      )}
 
       <div className="rounded-lg border bg-muted/30 p-3">
         <div className="text-xs text-muted-foreground">Your pubky</div>
@@ -85,12 +97,6 @@ export function AccountDetails({ outcome, info, onSignOut }: AccountDetailsProps
           This homeserver does not report your storage use and limits yet.
         </p>
       )}
-
-      <p className="flex items-start gap-2 text-xs text-muted-foreground">
-        <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-        Keep your recovery phrase safe in Pubky Ring. It is the only way back into this account; the homeserver cannot
-        recover it for you.
-      </p>
     </div>
   );
 }
