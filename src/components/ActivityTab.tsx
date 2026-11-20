@@ -80,17 +80,19 @@ function OwnBody({ own }: { own: OwnActivity }) {
   }
   if (own.status === 'failed') {
     return (
-      <p className="text-xs text-muted-foreground" data-testid="own-failed">
+      <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground" data-testid="own-failed">
         Your activity could not be read: {own.message}
+        <RefreshButton own={own} />
       </p>
     );
   }
   if (own.events.length === 0) {
     return (
-      <p className="text-xs text-muted-foreground" data-testid="own-none">
+      <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground" data-testid="own-none">
         {own.shownPath
           ? `No public changes of yours at ${own.shownPath}.`
           : 'Nothing yet. Your first public file will show up here.'}
+        <RefreshButton own={own} />
       </p>
     );
   }
@@ -107,16 +109,7 @@ function OwnBody({ own }: { own: OwnActivity }) {
         </div>
         <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
           {own.checkedAt && `Read ${formatDateTime(own.checkedAt)}.`}
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 px-1.5"
-            onClick={own.refresh}
-            aria-label="Read again"
-            data-testid="own-refresh"
-          >
-            <RefreshCw className={cn('h-3 w-3', own.refreshing && 'animate-spin')} />
-          </Button>
+          <RefreshButton own={own} />
         </p>
       </div>
 
@@ -158,6 +151,22 @@ function OwnBody({ own }: { own: OwnActivity }) {
         </Button>
       )}
     </div>
+  );
+}
+
+/** Reads the newest page again, from whatever the last read came to. */
+function RefreshButton({ own }: { own: OwnActivity }) {
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      className="h-6 px-1.5"
+      onClick={own.refresh}
+      aria-label="Read again"
+      data-testid="own-refresh"
+    >
+      <RefreshCw className={cn('h-3 w-3', own.refreshing && 'animate-spin')} />
+    </Button>
   );
 }
 

@@ -45,4 +45,18 @@ describe('useProfile', () => {
     await expect(act(() => result.current.save({ ...edit, name: 'Other' }))).rejects.toThrow('quota');
     expect(result.current.state).toMatchObject({ profile: { name: 'Alicia' } });
   });
+
+  it('does not show an edit that was saved after someone else signed in', async () => {
+    let saved: () => void = () => undefined;
+    const saveProfile = vi.fn(() => new Promise<void>((resolve) => (saved = resolve)));
+    const c = { profile: vi.fn(async () => profile), saveProfile } as unknown as HomeserverClient;
+    const { result, rerender } = renderHook(({ pubky }) => useProfile(c, pubky), { initialProps: { pubky: ALICE } });
+    await waitFor(() => expect(result.current.state.status).toBe('done'));
+    const saving = result.current.save({ name: 'Alicia', bio: '', status: '', links: [] });
+    rerender({ pubky: 'someone-else' });
+    await waitFor(() => expect(result.current.state).toEqual({ status: 'done', profile }));
+    saved();
+    await act(() => saving);
+    expect(result.current.state).toEqual({ status: 'done', profile });
+  });
 });

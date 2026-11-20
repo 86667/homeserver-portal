@@ -67,7 +67,14 @@ function Steps({ flow }: Pick<AccountTabProps, 'flow'>) {
         />
       );
     case 'waiting':
-      return <WaitingStep kind={step.kind} authUrl={step.authUrl} onCancel={backToStart} />;
+      return (
+        <WaitingStep
+          kind={step.kind}
+          authUrl={step.authUrl}
+          staysSignedIn={step.staysSignedIn}
+          onCancel={backToStart}
+        />
+      );
     case 'done':
       return (
         <AccountDetails

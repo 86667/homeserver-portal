@@ -46,6 +46,8 @@ export type RingRequest = {
   authUrl: string;
   /** Resolves once Ring's approval has been checked against this homeserver; rejects when the request expires. */
   awaitAccount: () => Promise<AccountInfo>;
+  /** Whether an approved sign-in outlasts the page on this browser. */
+  staysSignedIn: boolean;
 };
 
 /** The SDK's error for a homeserver's refusal names the pubky it could not place. */
@@ -54,9 +56,13 @@ const UNRESOLVED_HOMESERVER = /could not resolve homeserver for ([a-z0-9]{52})/;
 /**
  * How long a request waits for Ring. Long enough to install Ring and create a
  * key first, for a sign-up. The SDK cannot stop waiting on the relay, so an
- * abandoned request keeps polling until the page is closed; it is ignored.
+ * abandoned request keeps polling until the page is closed; an approval that
+ * still arrives for it is revoked.
  */
 const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** How long a visit waits for a saved sign-in to be checked before starting signed out. */
+const RESTORE_TIMEOUT_MS = 10 * 1000;
 
 /** A syntactically valid code no homeserver issues; asks whether codes are required. */
 const PROBE_INVITE_CODE = '0000-0000-0000';
@@ -70,6 +76,12 @@ const TESTNET_PKARR_PORT = 15411;
 export class HomeserverClient {
   /** The signed-in person's session, kept to write their profile with; null when nobody is signed in. */
   private session: Session | null = null;
+  /** The saved record of that session in the browser's store, when it has one. */
+  private savedId: string | null = null;
+  /** The Ring request whose approval would sign someone in; an approval for any other is revoked. */
+  private request: object | null = null;
+  /** The check of a saved sign-in that may still sign someone in; one that timed out or was overtaken may not. */
+  private restoring: object | null = null;
   /** Whether this browser can keep a sign-in across visits; found out once, on first need. */
   private keepsSignIn: Promise<boolean> | null = null;
 
@@ -105,20 +117,27 @@ export class HomeserverClient {
 
   /** Starts a Ring request; `inviteCode` only for a sign-up on a homeserver that needs one. */
   async startRequest(kind: RingRequestKind, inviteCode: string | null): Promise<RingRequest> {
-    await this.signOut();
+    const mine = {};
+    await this.endSignIn(mine);
     const flow = await this.startFlow(ACCOUNT_CAPABILITY as Capabilities, this.flowKind(kind, inviteCode), {
       clientId: clientId(),
       relay: this.config.relay,
     });
     const account = flow.awaitApproval().then(
-      (session) => this.confirmAccount(session),
+      (session) => this.confirmAccount(session, mine),
       (error: unknown) => noAccountOf(error),
     );
     // An abandoned request may still fail later; nobody is waiting for it then.
     account.catch(() => undefined);
     return {
       authUrl: flow.authorizationUrl,
-      awaitAccount: () => withTimeout(account, APPROVAL_TIMEOUT_MS, 'This request expired. Start again.'),
+      staysSignedIn: await this.canKeepSignIn(),
+      awaitAccount: () =>
+        withTimeout(account, APPROVAL_TIMEOUT_MS, 'This request expired. Start again.').catch((error: unknown) => {
+          // Expired or failed: an approval that comes later signs nobody in.
+          if (this.request === mine) this.request = null;
+          throw error;
+        }),
     };
   }
 
@@ -159,50 +178,90 @@ export class HomeserverClient {
    * their own record names, or, for a sign-up, this one. Reads the account
    * through it. A session at another homeserver means no account here,
    * whatever is there. The session is kept, for the profile editor, only when
-   * the account is here and Ring granted writing the profile; otherwise the
-   * grant is revoked at once. A kept session is also saved in the browser
-   * where it can be, so the next visit starts signed in.
+   * the account is here, Ring granted writing the profile, and `request` is
+   * still the one being waited for: an approval that arrives after Cancel,
+   * after the request expired or after a newer request signs nobody in.
+   * Otherwise the grant is revoked at once. A kept session is also saved in
+   * the browser where it can be, so the next visit starts signed in.
    */
-  private async confirmAccount(session: Session): Promise<AccountInfo> {
+  private async confirmAccount(session: Session, request: object): Promise<AccountInfo> {
     let keep = false;
     try {
       const account = await this.readAccountInfo(session);
-      keep = account.hasAccount && account.canEditProfile === true;
+      keep = keepsSessionFor(account);
       return account;
     } finally {
-      if (keep) {
+      if (keep && this.request === request) {
+        this.request = null;
         this.session = session;
-        // Not saved is not a failure: the sign-in then lasts until the page is closed.
-        if (await this.canKeepSignIn()) await this.pubky.browserSessionStore.save(session).catch(() => undefined);
+        if (await this.canKeepSignIn()) await this.saveSignIn(session);
       } else await revoke(session);
     }
+  }
+
+  /** Saves a session just adopted. Not saved is not a failure: the sign-in then lasts until the page is closed. */
+  private async saveSignIn(session: Session): Promise<void> {
+    const store = this.pubky.browserSessionStore;
+    const saved = await store.save(session).catch(() => null);
+    if (!saved) return;
+    // Signed out while it was being saved: that sign-out found nothing to forget.
+    if (this.session === session) this.savedId = saved.id;
+    else await store.remove(saved.id).catch(() => undefined);
   }
 
   /**
    * The account of whoever stayed signed in on this browser, or null when
    * nobody did. A saved sign-in the homeserver no longer honours (its grant
-   * was revoked in Ring, or ran out) is forgotten. Never throws: one that
-   * cannot be checked right now is left for the next visit.
+   * was revoked in Ring, or ran out) is forgotten. One that cannot be checked
+   * within ten seconds is left saved for the next visit, and signs nobody in
+   * on this one, however its check ends. Never throws.
    */
   async restoreSignIn(): Promise<AccountInfo | null> {
-    if (!(await this.canKeepSignIn())) return null;
+    const mine = {};
+    this.restoring = mine;
+    const restored = this.canKeepSignIn().then((keeps) => (keeps ? this.restoreSaved(mine) : null));
+    return withTimeout(restored, RESTORE_TIMEOUT_MS, 'The saved sign-in could not be checked in time')
+      .catch(() => null)
+      .finally(() => {
+        if (this.restoring === mine) this.restoring = null;
+      });
+  }
+
+  /** The newest saved sign-in for this homeserver that it still honours; another tab may have saved a later one. */
+  private async restoreSaved(restoring: object): Promise<AccountInfo | null> {
     const store = this.pubky.browserSessionStore;
-    try {
-      const saved = (await store.list()).find((record) => record.homeserver === this.config.homeserver);
-      if (!saved) return null;
+    // A sign-out that was cut short (the tab was closed, the homeserver was slow) is finished first.
+    for (const [pubky, at] of Object.entries(signingOut.read())) await this.forgetSignIns(pubky, at);
+    // What could not be forgotten just now is signed out all the same.
+    const signedOut = signingOut.read();
+    for (const { id, publicKey, createdAt } of await this.savedSignIns()) {
+      if (createdAt <= (signedOut[publicKey] ?? -Infinity)) continue;
       try {
-        const session = await store.restore(saved.id);
+        const session = await store.restore(id);
         const account = await this.readAccountInfo(session);
-        if (!account.hasAccount || !account.canEditProfile) return null;
-        this.session = session;
-        return account;
+        // Timed out, or a sign-in or sign-out took over meanwhile: the rest stays saved, unchecked.
+        if (this.restoring !== restoring) return null;
+        if (keepsSessionFor(account)) {
+          this.session = session;
+          this.savedId = id;
+          return account;
+        }
+        // Not a sign-in the page keeps a session for.
+        await revoke(session);
+        await store.remove(id).catch(() => undefined);
       } catch (error) {
-        if (isDeadSignIn(error)) await store.remove(saved.id);
-        return null;
+        if (isDeadSignIn(error)) await store.remove(id).catch(() => undefined);
       }
-    } catch {
-      return null;
     }
+    return null;
+  }
+
+  /** The sign-ins saved in this browser for this homeserver, newest first; `pubky`'s only when given. */
+  private async savedSignIns(pubky?: string) {
+    const saved = await this.pubky.browserSessionStore.list();
+    return saved
+      .filter((record) => record.homeserver === this.config.homeserver && (!pubky || record.publicKey === pubky))
+      .sort((a, b) => b.createdAt - a.createdAt);
   }
 
   private async readAccountInfo(session: Session): Promise<AccountInfo> {
@@ -218,12 +277,58 @@ export class HomeserverClient {
     return { pubky, hasAccount: true, canEditProfile, ...(account && { account }) };
   }
 
-  /** Revokes the signed-in person's grant, if the page holds one, and forgets any saved sign-in. Never throws. */
-  async signOut(): Promise<void> {
-    const session = this.session;
+  /**
+   * Signs out: abandons any Ring request or check of a saved sign-in,
+   * revokes the grant the page holds and forgets every sign-in saved in this
+   * browser for the same person, revoking those too. Sign-ins saved for
+   * other people are left alone. Never throws.
+   */
+  signOut(): Promise<void> {
+    return this.endSignIn(null);
+  }
+
+  /**
+   * Ends the sign-in and makes `next` the request being waited for, at once:
+   * a slower call that started earlier must not take that over. The saved
+   * sign-in is needed to revoke with, so the sign-out is noted first and the
+   * record forgotten after: if the revocation does not land (the homeserver
+   * is slow or out of reach, the tab is closed), the next visit still starts
+   * signed out, and tries again.
+   */
+  private async endSignIn(next: object | null): Promise<void> {
+    const { session, savedId } = this;
+    this.request = next;
+    this.restoring = null;
     this.session = null;
-    if (session) await revoke(session);
-    if (await this.canKeepSignIn()) await this.pubky.browserSessionStore.clear().catch(() => undefined);
+    this.savedId = null;
+    if (!session) return;
+    const pubky = session.info.publicKey.z32();
+    const at = signingOut.mark(pubky);
+    const revoked = await revoke(session);
+    if (!(await this.canKeepSignIn())) signingOut.clear(pubky, at);
+    else if (revoked || !savedId) await this.forgetSignIns(pubky, at, savedId);
+  }
+
+  /**
+   * Revokes and forgets the sign-ins saved for `pubky` up to the sign-out at
+   * `at`; one saved since is a new sign-in, and stays. `revoked` is the one
+   * whose grant is revoked already. A sign-in that could not be revoked stays
+   * saved, with the note of the sign-out, for the next visit to try again.
+   */
+  private async forgetSignIns(pubky: string, at: number, revoked: string | null = null): Promise<void> {
+    const store = this.pubky.browserSessionStore;
+    const signedOut = async () => (await this.savedSignIns(pubky)).filter((record) => record.createdAt <= at);
+    try {
+      for (const { id } of await signedOut()) {
+        const gone = id === revoked || (await store.restore(id).then(revoke, isDeadSignIn));
+        // Gone too when another tab forgot it meanwhile. A failure to remove tells little: revoking can take the
+        // record away already.
+        if (gone) await store.remove(id).catch(() => undefined);
+      }
+      if ((await signedOut()).length === 0) signingOut.clear(pubky, at);
+    } catch {
+      // The store could not be read: still noted as signed out.
+    }
   }
 
   /**
@@ -234,11 +339,17 @@ export class HomeserverClient {
   async saveProfile(edit: ProfileEdit): Promise<void> {
     if (!this.session) throw new Error('You are signed out. Sign in again to save your profile.');
     const storage = this.session.storage;
-    const stored = await storage.getJson(PROFILE_PATH).catch((error: unknown) => {
-      if (statusCodeOf(error) === 404) return {};
+    try {
+      const stored = await storage.getJson(PROFILE_PATH).catch((error: unknown) => {
+        if (statusCodeOf(error) === 404) return {};
+        throw error;
+      });
+      await storage.putJson(PROFILE_PATH, mergeProfile(isRecord(stored) ? stored : {}, edit));
+    } catch (error) {
+      // Signed out in another tab, or revoked in Ring, since this page signed in.
+      if (isEndedSignIn(error)) throw new Error('Your sign-in has ended. Sign out and sign in again.');
       throw error;
-    });
-    await storage.putJson(PROFILE_PATH, mergeProfile(isRecord(stored) ? stored : {}, edit));
+    }
   }
 
   /** The person's pubky.app profile, or null when they have none here. */
@@ -346,17 +457,78 @@ async function readAccount(grant: GrantSession): Promise<AccountRecord | undefin
 }
 
 /**
+ * The people a sign-out is under way for and when each began, noted where a
+ * write lands at once (`localStorage`), unlike the store their sign-ins are
+ * saved in. Storage that cannot be used is no failure: the sign-out then
+ * depends on finishing.
+ */
+const signingOut = {
+  key: 'homeserver-portal:signing-out',
+  /** Pubky to the time of the sign-out, in Unix milliseconds. */
+  read(): Record<string, number> {
+    try {
+      const noted: unknown = JSON.parse(localStorage.getItem(this.key) ?? '{}');
+      return isRecord(noted)
+        ? Object.fromEntries(
+            Object.entries(noted).filter((entry): entry is [string, number] => typeof entry[1] === 'number'),
+          )
+        : {};
+    } catch {
+      return {};
+    }
+  },
+  write(noted: Record<string, number>) {
+    try {
+      if (Object.keys(noted).length > 0) localStorage.setItem(this.key, JSON.stringify(noted));
+      else localStorage.removeItem(this.key);
+    } catch {
+      // No storage: nothing to note it in.
+    }
+  },
+  /** Notes a sign-out beginning now, and returns when that is. */
+  mark(pubky: string): number {
+    const at = Date.now();
+    this.write({ ...this.read(), [pubky]: at });
+    return at;
+  },
+  /** Drops the note of the sign-out at `at`; a later one for the same person stays. */
+  clear(pubky: string, at: number) {
+    const { [pubky]: noted, ...others } = this.read();
+    if (noted !== undefined && noted <= at) this.write(others);
+  },
+};
+
+/**
  * Whether a saved sign-in failed because the homeserver no longer honours it,
  * not because it could not be asked. The SDK reports a refused restore as a
  * `ClientStateError`; a refusal met later carries the HTTP status.
  */
 function isDeadSignIn(error: unknown): boolean {
-  const status = statusCodeOf(error);
-  return (error as { name?: unknown } | null)?.name === 'ClientStateError' || status === 401 || status === 403;
+  return isEndedSignIn(error) || statusCodeOf(error) === 403;
 }
 
-/** Best effort: a grant that could not be revoked stays listed in Ring until it expires. */
-const revoke = (session: Session) => session.signout().catch(() => undefined);
+/**
+ * Whether a write failed because the session behind it is gone: signed out
+ * in another tab, or revoked in Ring. Not 403, which a write also gets for an
+ * account that may not write.
+ */
+function isEndedSignIn(error: unknown): boolean {
+  return (error as { name?: unknown } | null)?.name === 'ClientStateError' || statusCodeOf(error) === 401;
+}
+
+/** Whether the page keeps a session for this account: it is here, and Ring granted writing its profile. */
+const keepsSessionFor = (account: AccountInfo) => account.hasAccount && account.canEditProfile === true;
+
+/**
+ * Revokes a session's grant; whether it is revoked now, which a session the
+ * homeserver had ended already also is. Best effort: a grant that could not be
+ * revoked stays listed in Ring until it expires.
+ */
+const revoke = (session: Session): Promise<boolean> =>
+  session.signout().then(
+    () => true,
+    (error: unknown) => isDeadSignIn(error),
+  );
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);

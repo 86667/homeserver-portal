@@ -49,6 +49,14 @@ describe('profileErrors', () => {
     expect(profileErrors({ name: 'Bob', bio: 'b'.repeat(160), status: 's'.repeat(50), links })).toEqual({});
   });
 
+  it('takes addresses that are not web pages, as pubky.app does', () => {
+    const links = [
+      { title: 'Mail', url: 'mailto:a@a.example' },
+      { title: 'Pubky', url: 'pubky://abc/pub/x' },
+    ];
+    expect(profileErrors({ ...edit, links })).toEqual({});
+  });
+
   it('counts characters, not UTF-16 units', () => {
     expect(profileErrors({ ...edit, name: '😀😀' }).name).toBeDefined();
     expect(profileErrors({ ...edit, name: '😀'.repeat(50) })).toEqual({});
@@ -64,6 +72,10 @@ describe('profileErrors', () => {
     ['links', { links: [{ title: '', url: 'https://a.example/' }] }],
     ['links', { links: [{ title: 'T', url: '' }] }],
     ['links', { links: [{ title: 'T', url: 'a.example' }] }],
+    ['links', { links: [{ title: 'T', url: 'javascript:alert(1)' }] }],
+    ['links', { links: [{ title: 'T', url: 'data:text/html,x' }] }],
+    ['links', { links: [{ title: 'T', url: 'vbscript:x' }] }],
+    ['links', { links: [{ title: 'T', url: ' JavaScript:alert(1)' }] }],
     ['links', { links: [{ title: 't'.repeat(101), url: 'https://a.example/' }] }],
     ['links', { links: [{ title: 'T', url: `https://a.example/${'p'.repeat(300)}` }] }],
   ] satisfies [keyof ProfileErrors, Partial<ProfileEdit>][])('refuses a bad %s', (part, change) => {

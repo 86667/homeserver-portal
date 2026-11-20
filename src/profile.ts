@@ -72,7 +72,9 @@ function linksError(links: ProfileEdit['links']): string | undefined {
       return `A link's title has up to ${PROFILE_LIMITS.linkTitleMax} characters.`;
     if (length(url) > PROFILE_LIMITS.linkUrlMax)
       return `A link's address has up to ${PROFILE_LIMITS.linkUrlMax} characters.`;
-    if (!URL.canParse(url)) return `"${url}" is not a full address, such as https://example.com.`;
+    const parsed = parseUrl(url);
+    if (!parsed) return `"${url}" is not a full address, such as https://example.com.`;
+    if (SCRIPT_SCHEMES.includes(parsed.protocol)) return `"${url}" is not an address a link can have.`;
   }
   return undefined;
 }
@@ -94,7 +96,18 @@ export function mergeProfile(stored: Record<string, unknown>, edit: ProfileEdit)
 
 const length = (text: string) => [...text].length;
 
+/** Addresses that run script where they are followed. pubky.app's model takes them; the page does not write them. */
+const SCRIPT_SCHEMES = ['javascript:', 'data:', 'vbscript:'];
+
+function parseUrl(text: string): URL | null {
+  try {
+    return new URL(text);
+  } catch {
+    return null;
+  }
+}
+
 function canonicalUrl(typed: string): string {
   const trimmed = typed.trim();
-  return URL.canParse(trimmed) ? new URL(trimmed).href : trimmed;
+  return parseUrl(trimmed)?.href ?? trimmed;
 }

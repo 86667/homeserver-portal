@@ -55,7 +55,11 @@ function homeserver({
     isInviteRequired: vi.fn(async () => inviteRequired),
     inviteStatus: vi.fn(async () => inviteStatus(asked++)),
     startRequest: vi.fn(
-      async (): Promise<RingRequest> => ({ authUrl: 'pubkyauth://signup?secret=s', awaitAccount: () => account() }),
+      async (): Promise<RingRequest> => ({
+        authUrl: 'pubkyauth://signup?secret=s',
+        awaitAccount: () => account(),
+        staysSignedIn: true,
+      }),
     ),
     profile: vi.fn(async (pubky: string) => (pubky === ALICE ? profile : null)),
     saveProfile: vi.fn(async (_edit: ProfileEdit): Promise<void> => undefined),
@@ -195,6 +199,25 @@ describe('AccountFlow sign-in', () => {
 });
 
 describe('AccountFlow waiting and failures', () => {
+  it('says before the QR code what Ring will ask for, and whether the sign-in is kept', async () => {
+    const client = homeserver({ account: () => new Promise(() => {}) });
+    renderOnAccount();
+    fireEvent.click(await screen.findByTestId('account-signin'));
+    const kept = (await screen.findByTestId('account-consent')).textContent;
+    expect(kept).toMatch(/read all your data here, and write your profile only/);
+    expect(kept).toMatch(/stay signed in on this browser until you sign out, which revokes this access/);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    client.startRequest.mockResolvedValue({
+      authUrl: 'pubkyauth://x',
+      awaitAccount: () => new Promise(() => {}),
+      staysSignedIn: false,
+    });
+    fireEvent.click(await screen.findByTestId('account-signin'));
+    const notKept = (await screen.findByTestId('account-consent')).textContent;
+    expect(notKept).not.toMatch(/stay signed in/);
+    expect(notKept).toMatch(/Signing out revokes this access/);
+  });
+
   it('shows the QR code and the link while waiting, copies the link, and Cancel goes back', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
@@ -362,6 +385,38 @@ describe('AccountFlow activity tab', () => {
     fireEvent.mouseDown(screen.getByTestId('tab-activity'));
     expect(await screen.findByTestId('own-none')).toBeTruthy();
   });
+
+  it('reads again from a failed read, and from an empty one', async () => {
+    const client = homeserver({ events: [] });
+    client.ownEvents.mockRejectedValueOnce(new Error('offline'));
+    renderOnAccount();
+    fireEvent.click(await screen.findByTestId('account-signin'));
+    await screen.findByText('Welcome back');
+    fireEvent.mouseDown(screen.getByTestId('tab-activity'));
+    expect((await screen.findByTestId('own-failed')).textContent).toMatch(/offline/);
+    fireEvent.click(screen.getByTestId('own-refresh'));
+    await screen.findByTestId('own-none');
+    const reads = client.ownEvents.mock.calls.length;
+    fireEvent.click(screen.getByTestId('own-refresh'));
+    await waitFor(() => expect(client.ownEvents).toHaveBeenCalledTimes(reads + 1));
+  });
+
+  it("reads the next person's activity when they open the tab, not when they sign in", async () => {
+    const client = homeserver();
+    renderOnAccount();
+    fireEvent.click(await screen.findByTestId('account-signin'));
+    await screen.findByText('Welcome back');
+    fireEvent.mouseDown(screen.getByTestId('tab-activity'));
+    await screen.findByTestId('own-events');
+    const reads = client.ownEvents.mock.calls.length;
+    fireEvent.click(screen.getByTestId('sign-out'));
+    fireEvent.click(await screen.findByTestId('account-signin'));
+    await screen.findByText('Welcome back');
+    await screen.findByTestId('profile-name');
+    expect(client.ownEvents).toHaveBeenCalledTimes(reads);
+    fireEvent.mouseDown(screen.getByTestId('tab-activity'));
+    await waitFor(() => expect(client.ownEvents).toHaveBeenCalledTimes(reads + 1));
+  });
 });
 
 describe('AccountFlow homeserver tab', () => {
@@ -472,6 +527,22 @@ describe('AccountFlow signed-in details', () => {
     });
     expect(screen.getByRole('link', { name: 'Site' })).toBeTruthy();
     expect(screen.queryByTestId('profile-editor')).toBeNull();
+  });
+
+  it('removes a link, and offers no sixth one', async () => {
+    const links = Array.from({ length: 5 }, (_, i) => ({ title: `Link ${i + 1}`, url: `https://a.example/${i + 1}` }));
+    const client = homeserver({ profile: { name: 'Alice', bio: null, status: null, links, avatar: null } });
+    renderOnAccount();
+    fireEvent.click(await screen.findByTestId('account-signin'));
+    fireEvent.click(await screen.findByTestId('profile-edit'));
+    expect(screen.queryByTestId('profile-add-link')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove link 2' }));
+    expect(screen.getByTestId('profile-add-link')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('profile-save'));
+    await screen.findByTestId('profile-name');
+    expect(client.saveProfile).toHaveBeenCalledWith(
+      expect.objectContaining({ links: [links[0], links[2], links[3], links[4]] }),
+    );
   });
 
   it('does not save an edit pubky.app would refuse, and says what is wrong', async () => {

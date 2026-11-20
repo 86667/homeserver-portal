@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { HomeserverClient } from './homeserver-client';
 import type { Profile } from './model';
 import type { ProfileEdit } from './profile';
@@ -42,10 +42,17 @@ export function useProfile(client: HomeserverClient | null, pubky: string | null
     };
   }, [client, pubky]);
 
+  // Whose profile is on show; a save that ends after someone else signed in must not put its edit there.
+  const shown = useRef(pubky);
+  useEffect(() => {
+    shown.current = pubky;
+  }, [pubky]);
+
   const save = useCallback(
     async (edit: ProfileEdit) => {
       if (!client) throw new Error('The homeserver is not connected.');
       await client.saveProfile(edit);
+      if (shown.current !== pubky) return;
       // What was written, with the picture the edit does not touch.
       setState((current) => ({
         status: 'done',
@@ -58,7 +65,7 @@ export function useProfile(client: HomeserverClient | null, pubky: string | null
         },
       }));
     },
-    [client],
+    [client, pubky],
   );
 
   return { state, save };

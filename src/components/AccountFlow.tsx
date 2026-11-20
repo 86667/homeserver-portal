@@ -1,6 +1,6 @@
 'use client';
 
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useState, useEffect } from 'react';
 import { Activity, Server, UserRound } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -28,8 +28,8 @@ interface AccountFlowProps {
 /**
  * The public page of a homeserver, in tabs: facts about the homeserver, the
  * visitor's account (sign up or sign in with Pubky Ring, then what they have
- * here) and, once signed in, their own activity on it. Nothing is stored;
- * reloading signs out.
+ * here) and, once signed in, their own activity on it. Only the sign-in
+ * outlasts a reload, where the browser can keep it.
  */
 export function AccountFlow({ config, initialCode }: AccountFlowProps) {
   return config ? <ConnectedTabs config={config} initialCode={initialCode} /> : <NotSetUpTabs />;
@@ -51,6 +51,13 @@ function ConnectedTabs({ config, initialCode }: { config: AccountConfig; initial
   const flow = useAccountFlow(config, initialCode);
   const signedIn = flow.step.name === 'done' && flow.step.info.hasAccount ? flow.step.info.pubky : null;
   const profile = useProfile(flow.client, signedIn);
+  // The Activity tab goes with the sign-in, so the next person's activity is read when they open it, not before.
+  useEffect(() => {
+    if (signedIn) return;
+    setOpened((current) =>
+      current.has('activity') ? new Set([...current].filter((name) => name !== 'activity')) : current,
+    );
+  }, [signedIn]);
   const own = useOwnActivity(flow.client, signedIn, opened.has('activity'));
   const homeserver = useHomeserver(flow.client, opened.has('homeserver'));
   // Back where the sign-in is, whichever tab the person was on.

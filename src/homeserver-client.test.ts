@@ -11,13 +11,34 @@ const sdk = vi.hoisted(() => {
   const clientFetch = vi.fn();
   const startGrantAuthFlow = vi.fn();
   const publicGet = vi.fn();
-  // The browser's store of saved sign-ins. Not available unless a test says so.
+  // The browser's store of saved sign-ins: what `saved` holds. Not available unless a test says so.
+  type Saved = { id: string; homeserver: string; publicKey: string; createdAt: number; session: unknown };
+  const saved: Saved[] = [];
   const store = {
+    saved,
     isAvailable: vi.fn(async () => false),
-    save: vi.fn(async () => undefined),
-    list: vi.fn(async (): Promise<{ id: string; homeserver: string }[]> => []),
-    restore: vi.fn(),
-    remove: vi.fn(async () => undefined),
+    save: vi.fn(async (session: { info: { publicKey: { z32: () => string } }; savedAt?: string }) => {
+      const record = {
+        id: `saved-${saved.length + 1}`,
+        homeserver: session.savedAt ?? '',
+        publicKey: session.info.publicKey.z32(),
+        createdAt: Date.now(),
+        session,
+      };
+      saved.push(record);
+      return record;
+    }),
+    list: vi.fn(async () => [...saved]),
+    restore: vi.fn(async (id: string): Promise<unknown> => {
+      const record = saved.find((r) => r.id === id);
+      if (!record) throw Object.assign(new Error('Browser session is no longer valid.'), { name: 'ClientStateError' });
+      if (record.session instanceof Error) throw record.session;
+      return record.session;
+    }),
+    remove: vi.fn(async (id: string) => {
+      const at = saved.findIndex((r) => r.id === id);
+      if (at >= 0) saved.splice(at, 1);
+    }),
     clear: vi.fn(async () => undefined),
   };
   const GrantAuthFlow = { isDelegationAvailable: false, startDelegated: vi.fn() };
@@ -86,6 +107,8 @@ function session({
     },
     storage: { getJson, putJson },
     signout,
+    // Where the fake store files this session when it is saved.
+    savedAt: homeserver,
   };
 }
 
@@ -113,10 +136,18 @@ function homeserver(routes: Record<string, () => Response | Promise<Response>>) 
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
   sdk.GrantAuthFlow.isDelegationAvailable = false;
   sdk.store.isAvailable.mockResolvedValue(false);
-  sdk.store.list.mockResolvedValue([]);
+  sdk.store.saved.length = 0;
 });
+
+/** A sign-in saved in the browser on an earlier visit, or by another tab; an Error is one that cannot be restored. */
+function savedSignIn(id: string, restored: unknown, { createdAt = 1, homeserver = HOMESERVER, pubky = ALICE } = {}) {
+  sdk.store.saved.push({ id, homeserver, publicKey: pubky, createdAt, session: restored });
+}
+
+const SIGNING_OUT = 'homeserver-portal:signing-out';
 
 /** A browser that can keep a sign-in: the delegated flow resolves with `approved`. */
 function keepingBrowser(approved?: unknown) {
@@ -377,6 +408,7 @@ describe('staying signed in', () => {
       { clientId: 'localhost', relay: config.relay },
     );
     expect(sdk.startGrantAuthFlow).not.toHaveBeenCalled();
+    expect(request.staysSignedIn).toBe(true);
     await request.awaitAccount();
     expect(sdk.store.save).toHaveBeenCalledWith(approved);
   });
@@ -401,21 +433,21 @@ describe('staying signed in', () => {
     await testnet.startRequest('signin', null);
     sdk.store.isAvailable.mockResolvedValue(false);
     const client = await HomeserverClient.connect(config);
-    await (await client.startRequest('signin', null)).awaitAccount();
+    const request = await client.startRequest('signin', null);
+    expect(request.staysSignedIn).toBe(false);
+    await request.awaitAccount();
     expect(sdk.GrantAuthFlow.startDelegated).not.toHaveBeenCalled();
     expect(sdk.startGrantAuthFlow).toHaveBeenCalledTimes(2);
     expect(sdk.store.save).not.toHaveBeenCalled();
     await expect(client.restoreSignIn()).resolves.toBeNull();
   });
 
-  it('restores the saved sign-in for this homeserver, ready to save a profile', async () => {
+  it('restores the newest saved sign-in for this homeserver, ready to save a profile', async () => {
     keepingBrowser();
     const putJson = vi.fn(async () => undefined);
-    sdk.store.list.mockResolvedValue([
-      { id: 'elsewhere', homeserver: OTHER_HOMESERVER },
-      { id: 'here', homeserver: HOMESERVER },
-    ]);
-    sdk.store.restore.mockResolvedValue(session({ putJson }));
+    savedSignIn('elsewhere', session(), { homeserver: OTHER_HOMESERVER, createdAt: 3 });
+    savedSignIn('older', session(), { createdAt: 1 });
+    savedSignIn('here', session({ putJson }), { createdAt: 2 });
     const client = await HomeserverClient.connect(config);
     await expect(client.restoreSignIn()).resolves.toMatchObject({
       pubky: ALICE,
@@ -423,7 +455,7 @@ describe('staying signed in', () => {
       canEditProfile: true,
       account: { usedBytes: 30 * 1024 },
     });
-    expect(sdk.store.restore).toHaveBeenCalledWith('here');
+    expect(sdk.store.restore.mock.calls).toEqual([['here']]);
     await client.saveProfile({ name: 'Alice', bio: '', status: '', links: [] });
     expect(putJson).toHaveBeenCalled();
   });
@@ -435,41 +467,276 @@ describe('staying signed in', () => {
     expect(sdk.store.restore).not.toHaveBeenCalled();
   });
 
-  it('forgets a saved sign-in the homeserver no longer honours', async () => {
+  it('forgets a saved sign-in the homeserver no longer honours, and falls back to an older one', async () => {
     keepingBrowser();
-    sdk.store.list.mockResolvedValue([{ id: 'here', homeserver: HOMESERVER }]);
-    const refusals = [
+    savedSignIn('older', session(), { createdAt: 1 });
+    savedSignIn(
+      'revoked',
       Object.assign(new Error('Browser session is no longer valid.'), { name: 'ClientStateError' }),
-      sdkError(401),
-    ];
-    for (const refusal of refusals) {
-      sdk.store.restore.mockRejectedValueOnce(refusal);
-      const client = await HomeserverClient.connect(config);
-      await expect(client.restoreSignIn()).resolves.toBeNull();
-    }
-    expect(sdk.store.remove).toHaveBeenCalledTimes(2);
-    expect(sdk.store.remove).toHaveBeenCalledWith('here');
+      { createdAt: 2 },
+    );
+    savedSignIn('refused', sdkError(401), { createdAt: 3 });
+    const client = await HomeserverClient.connect(config);
+    await expect(client.restoreSignIn()).resolves.toMatchObject({ pubky: ALICE });
+    expect(sdk.store.restore.mock.calls).toEqual([['refused'], ['revoked'], ['older']]);
+    expect(sdk.store.saved.map((r) => r.id)).toEqual(['older']);
+  });
+
+  it('revokes and forgets a saved sign-in that is no longer one the page keeps', async () => {
+    keepingBrowser();
+    const signout = vi.fn(async () => undefined);
+    savedSignIn('read-only', session({ signout, capabilities: ['/:r'] }));
+    const client = await HomeserverClient.connect(config);
+    await expect(client.restoreSignIn()).resolves.toBeNull();
+    expect(signout).toHaveBeenCalledTimes(1);
+    expect(sdk.store.saved).toEqual([]);
   });
 
   it('keeps a saved sign-in it could not check, for the next visit', async () => {
     keepingBrowser();
-    sdk.store.list.mockResolvedValue([{ id: 'here', homeserver: HOMESERVER }]);
-    sdk.store.restore.mockRejectedValue(new TypeError('Failed to fetch'));
+    savedSignIn('here', new TypeError('Failed to fetch'));
     const client = await HomeserverClient.connect(config);
     await expect(client.restoreSignIn()).resolves.toBeNull();
-    sdk.store.list.mockRejectedValue(new Error('storage blocked'));
+    sdk.store.list.mockRejectedValueOnce(new Error('storage blocked'));
     await expect(client.restoreSignIn()).resolves.toBeNull();
     expect(sdk.store.remove).not.toHaveBeenCalled();
   });
 
-  it('forgets the saved sign-in on sign-out, and revokes its grant', async () => {
+  it('starts signed out when the check takes over ten seconds, and stays so when the check ends', async () => {
+    vi.useFakeTimers();
+    keepingBrowser();
+    const signout = vi.fn(async () => undefined);
+    let answer: (account: unknown) => void = () => undefined;
+    savedSignIn('here', session({ signout, account: () => new Promise((resolve) => (answer = resolve)) }));
+    const client = await HomeserverClient.connect(config);
+    const restored = client.restoreSignIn();
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expect(restored).resolves.toBeNull();
+    answer(ACCOUNT);
+    await vi.advanceTimersByTimeAsync(0);
+    // Nobody is signed in behind the page, and the sign-in is still saved, unrevoked.
+    await expect(client.saveProfile({ name: 'Alice', bio: '', status: '', links: [] })).rejects.toThrow(/signed out/);
+    await client.signOut();
+    expect(signout).not.toHaveBeenCalled();
+    expect(sdk.store.saved.map((r) => r.id)).toEqual(['here']);
+  });
+
+  it('on sign-out revokes the grant, then forgets the saved sign-in', async () => {
     const signout = vi.fn(async () => undefined);
     keepingBrowser(session({ signout }));
     const client = await HomeserverClient.connect(config);
     await (await client.startRequest('signin', null)).awaitAccount();
+    expect(sdk.store.saved).toHaveLength(1);
     await client.signOut();
+    // The saved sign-in is what the revocation is signed with, so it goes last.
+    expect(signout.mock.invocationCallOrder[0]).toBeLessThan(sdk.store.remove.mock.invocationCallOrder[0]);
     expect(signout).toHaveBeenCalledTimes(1);
-    expect(sdk.store.clear).toHaveBeenCalled();
+    expect(sdk.store.saved).toEqual([]);
+    expect(sdk.store.clear).not.toHaveBeenCalled();
+    expect(localStorage.getItem(SIGNING_OUT)).toBeNull();
+  });
+
+  it("on sign-out also revokes and forgets the same person's other saved sign-ins, and nobody else's", async () => {
+    const unchecked = vi.fn(async () => undefined);
+    const bobs = vi.fn(async () => undefined);
+    keepingBrowser(session());
+    // One an earlier visit could not check, and another person's from another tab.
+    savedSignIn('unchecked', session({ signout: unchecked }));
+    savedSignIn('bob', session({ pubky: OTHER_HOMESERVER, signout: bobs }), { pubky: OTHER_HOMESERVER });
+    const client = await HomeserverClient.connect(config);
+    await (await client.startRequest('signin', null)).awaitAccount();
+    // Starting a sign-in forgot nothing.
+    expect(sdk.store.saved).toHaveLength(3);
+    await client.signOut();
+    expect(unchecked).toHaveBeenCalledTimes(1);
+    expect(bobs).not.toHaveBeenCalled();
+    expect(sdk.store.saved.map((r) => r.id)).toEqual(['bob']);
+  });
+
+  it('finishes on the next visit a sign-out whose revocation never landed', async () => {
+    const hung = vi.fn(() => new Promise<void>(() => undefined));
+    keepingBrowser(session({ signout: hung }));
+    const client = await HomeserverClient.connect(config);
+    await (await client.startRequest('signin', null)).awaitAccount();
+    void client.signOut(); // the tab is closed before the homeserver answers
+    await vi.waitFor(() => expect(hung).toHaveBeenCalledTimes(1));
+    expect(sdk.store.saved).toHaveLength(1);
+    expect(Object.keys(JSON.parse(localStorage.getItem(SIGNING_OUT)!))).toEqual([ALICE]);
+
+    // The next visit: the sign-in is still saved, and must not be restored.
+    const signout = vi.fn(async () => undefined);
+    sdk.store.saved[0].session = session({ signout });
+    const next = await HomeserverClient.connect(config);
+    await expect(next.restoreSignIn()).resolves.toBeNull();
+    expect(signout).toHaveBeenCalledTimes(1);
+    expect(sdk.store.saved).toEqual([]);
+    expect(localStorage.getItem(SIGNING_OUT)).toBeNull();
+  });
+
+  it('tries again on the next visit when the revocation failed, and signs nobody in meanwhile', async () => {
+    const signout = vi.fn(async (): Promise<void> => Promise.reject(new TypeError('Failed to fetch')));
+    keepingBrowser(session({ signout }));
+    const client = await HomeserverClient.connect(config);
+    await (await client.startRequest('signin', null)).awaitAccount();
+    await client.signOut();
+    // Still saved: it is what the revocation is signed with.
+    expect(sdk.store.saved).toHaveLength(1);
+
+    // Still out of reach on the next visit: signed out all the same.
+    const offline = await HomeserverClient.connect(config);
+    await expect(offline.restoreSignIn()).resolves.toBeNull();
+    expect(sdk.store.saved).toHaveLength(1);
+    expect(signout).toHaveBeenCalledTimes(2);
+
+    signout.mockResolvedValue(undefined);
+    const online = await HomeserverClient.connect(config);
+    await expect(online.restoreSignIn()).resolves.toBeNull();
+    expect(sdk.store.saved).toEqual([]);
+    expect(localStorage.getItem(SIGNING_OUT)).toBeNull();
+  });
+
+  it("keeps the note of a sign-out while the sign-in could not be forgotten, and of other people's", async () => {
+    keepingBrowser(session());
+    savedSignIn('bob', new TypeError('Failed to fetch'), { pubky: OTHER_HOMESERVER });
+    localStorage.setItem(SIGNING_OUT, JSON.stringify({ [OTHER_HOMESERVER]: 5 }));
+    const client = await HomeserverClient.connect(config);
+    await (await client.startRequest('signin', null)).awaitAccount();
+    sdk.store.remove.mockRejectedValueOnce(new Error('storage blocked'));
+    await client.signOut();
+    expect(Object.keys(JSON.parse(localStorage.getItem(SIGNING_OUT)!))).toEqual([OTHER_HOMESERVER, ALICE]);
+    const next = await HomeserverClient.connect(config);
+    await expect(next.restoreSignIn()).resolves.toBeNull();
+    // Alice's is forgotten now; Bob's could not be revoked, so it and its note stay, and he is not signed in.
+    expect(sdk.store.saved.map((r) => r.id)).toEqual(['bob']);
+    expect(Object.keys(JSON.parse(localStorage.getItem(SIGNING_OUT)!))).toEqual([OTHER_HOMESERVER]);
+  });
+
+  it('leaves alone a sign-in made after the sign-out began, by the same person', async () => {
+    vi.useFakeTimers();
+    const slow = vi.fn(() => new Promise<void>((resolve) => setTimeout(resolve, 50)));
+    keepingBrowser(session({ signout: slow }));
+    const client = await HomeserverClient.connect(config);
+    await (await client.startRequest('signin', null)).awaitAccount();
+    const signingOut = client.signOut();
+    await vi.advanceTimersByTimeAsync(10);
+    // Signed in again while the homeserver has not answered the revocation.
+    const signout = vi.fn(async () => undefined);
+    keepingBrowser(session({ signout }));
+    await (await client.startRequest('signin', null)).awaitAccount();
+    await vi.advanceTimersByTimeAsync(50);
+    await signingOut;
+    expect(signout).not.toHaveBeenCalled();
+    expect(sdk.store.saved.map((r) => r.id)).toEqual(['saved-2']);
+    // And the next visit restores it, whatever note the sign-out left.
+    const next = await HomeserverClient.connect(config);
+    await expect(next.restoreSignIn()).resolves.toMatchObject({ pubky: ALICE });
+    expect(signout).not.toHaveBeenCalled();
+  });
+
+  it('forgets a sign-in whose saving ended after the sign-out', async () => {
+    keepingBrowser(session());
+    let finishSave: () => void = () => undefined;
+    const save = sdk.store.save.getMockImplementation()!;
+    sdk.store.save.mockImplementationOnce(async (approved) => {
+      await new Promise<void>((resolve) => (finishSave = resolve));
+      return save(approved);
+    });
+    const client = await HomeserverClient.connect(config);
+    const signedIn = (await client.startRequest('signin', null)).awaitAccount();
+    await vi.waitFor(() => expect(sdk.store.save).toHaveBeenCalled());
+    await client.signOut();
+    finishSave();
+    await signedIn;
+    expect(sdk.store.saved).toEqual([]);
+  });
+});
+
+describe('an approval nobody is waiting for', () => {
+  /** A Ring flow, in a browser that keeps sign-ins, approved when the test says so. */
+  function pendingFlow() {
+    let approve: (session: unknown) => void = () => undefined;
+    const approval = new Promise((resolve) => (approve = resolve));
+    keepingBrowser();
+    sdk.GrantAuthFlow.startDelegated.mockResolvedValueOnce({
+      authorizationUrl: 'pubkyauth://x',
+      awaitApproval: () => approval,
+    });
+    return (session: unknown) => approve(session);
+  }
+  const edit = { name: 'Alice', bio: '', status: '', links: [] };
+
+  it('signs nobody in after Cancel: the grant is revoked and nothing is saved', async () => {
+    const signout = vi.fn(async () => undefined);
+    const approve = pendingFlow();
+    const client = await HomeserverClient.connect(config);
+    const request = await client.startRequest('signin', null);
+    await client.signOut(); // Cancel
+    approve(session({ signout }));
+    await request.awaitAccount();
+    expect(signout).toHaveBeenCalledTimes(1);
+    expect(sdk.store.save).not.toHaveBeenCalled();
+    await expect(client.saveProfile(edit)).rejects.toThrow(/signed out/);
+  });
+
+  it('signs nobody in once the request has expired', async () => {
+    vi.useFakeTimers();
+    const signout = vi.fn(async () => undefined);
+    const approve = pendingFlow();
+    const client = await HomeserverClient.connect(config);
+    const waiting = (await client.startRequest('signin', null)).awaitAccount();
+    waiting.catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+    await expect(waiting).rejects.toThrow('This request expired');
+    approve(session({ signout }));
+    await vi.waitFor(() => expect(signout).toHaveBeenCalledTimes(1));
+    expect(sdk.store.save).not.toHaveBeenCalled();
+    await expect(client.saveProfile(edit)).rejects.toThrow(/signed out/);
+  });
+
+  it('does not replace the person a newer request signed in', async () => {
+    const lateSignout = vi.fn(async () => undefined);
+    const putJson = vi.fn(async () => undefined);
+    const approveFirst = pendingFlow();
+    const client = await HomeserverClient.connect(config);
+    const first = await client.startRequest('signin', null);
+    const kept = session({ putJson });
+    keepingBrowser(kept);
+    await (await client.startRequest('signin', null)).awaitAccount();
+    approveFirst(session({ pubky: OTHER_HOMESERVER, signout: lateSignout }));
+    await first.awaitAccount();
+    expect(lateSignout).toHaveBeenCalledTimes(1);
+    expect(sdk.store.save.mock.calls).toEqual([[kept]]);
+    await client.saveProfile(edit);
+    expect(putJson).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the newer of two requests started while a sign-out was still under way', async () => {
+    vi.useFakeTimers();
+    const slow = vi.fn(() => new Promise<void>((resolve) => setTimeout(resolve, 50)));
+    keepingBrowser(session({ signout: slow }));
+    const client = await HomeserverClient.connect(config);
+    await (await client.startRequest('signin', null)).awaitAccount();
+    const putJson = vi.fn(async () => undefined);
+    const signout = vi.fn(async () => undefined);
+    // The second request reaches Ring first and is approved; the first one's QR code is never scanned.
+    sdk.GrantAuthFlow.startDelegated
+      .mockResolvedValueOnce({
+        authorizationUrl: 'pubkyauth://second',
+        awaitApproval: () => Promise.resolve(session({ putJson, signout })),
+      })
+      .mockResolvedValue({ authorizationUrl: 'pubkyauth://first', awaitApproval: () => new Promise(() => undefined) });
+    // The first waits on the slow sign-out; the second starts after it and overtakes it.
+    const first = client.startRequest('signin', null);
+    await vi.advanceTimersByTimeAsync(10);
+    const second = await client.startRequest('signin', null);
+    await second.awaitAccount();
+    await vi.advanceTimersByTimeAsync(50);
+    await first;
+    // The second request's sign-in is the one held, unrevoked and still saved.
+    await client.saveProfile(edit);
+    expect(putJson).toHaveBeenCalledTimes(1);
+    expect(signout).not.toHaveBeenCalled();
+    expect(sdk.store.saved.map((r) => r.id)).toEqual(['saved-2']);
   });
 });
 
@@ -516,6 +783,28 @@ describe('saveProfile', () => {
     await (await client.startRequest('signin', null)).awaitAccount();
     await expect(client.saveProfile(edit)).rejects.toThrow('database down');
     expect(putJson).not.toHaveBeenCalled();
+  });
+
+  it('says the sign-in has ended when the session is gone: refused, or forgotten by another tab', async () => {
+    const gone = Object.assign(new Error('Browser session is no longer valid.'), { name: 'ClientStateError' });
+    const sessions = [
+      session({ getJson: async () => Promise.reject(sdkError(401)) }),
+      session({ putJson: async () => Promise.reject(sdkError(401)) }),
+      session({ putJson: async () => Promise.reject(gone) }),
+    ];
+    for (const ended of sessions) {
+      flow(ended);
+      const client = await HomeserverClient.connect(config);
+      await (await client.startRequest('signin', null)).awaitAccount();
+      await expect(client.saveProfile(edit)).rejects.toThrow(/sign-in has ended/);
+    }
+  });
+
+  it("passes on a refusal to write as it is, such as a disabled account's", async () => {
+    flow(session({ putJson: async () => Promise.reject(sdkError(403, 'account disabled')) }));
+    const client = await HomeserverClient.connect(config);
+    await (await client.startRequest('signin', null)).awaitAccount();
+    await expect(client.saveProfile(edit)).rejects.toThrow('account disabled');
   });
 
   it('refuses once signed out', async () => {

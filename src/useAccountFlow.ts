@@ -7,7 +7,7 @@ export type Step =
   | { name: 'connecting' }
   | { name: 'unavailable'; message: string }
   | { name: 'start' }
-  | { name: 'waiting'; kind: RingRequestKind; authUrl: string }
+  | { name: 'waiting'; kind: RingRequestKind; authUrl: string; staysSignedIn: boolean }
   | { name: 'checking' }
   | { name: 'done'; kind: RingRequestKind; info: AccountInfo; inviteStatus?: InviteStatus }
   | { name: 'failed'; message: string };
@@ -76,7 +76,7 @@ export function useAccountFlow(config: AccountConfig, initialCode: string) {
       try {
         const request = await client.startRequest(kind, inviteCode);
         if (!current()) return;
-        setStep({ name: 'waiting', kind, authUrl: request.authUrl });
+        setStep({ name: 'waiting', kind, authUrl: request.authUrl, staysSignedIn: request.staysSignedIn });
 
         const info = await request.awaitAccount();
         if (!current()) return;
