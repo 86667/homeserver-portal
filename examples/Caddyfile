@@ -1,0 +1,27 @@
+# Example: the portal served by Caddy, which also gets the TLS certificate.
+# Replace the domain and the path, then add this site to your Caddyfile.
+#
+# The files are the `site` directory of a release, with your `config.json`
+# in it (see the README). Nothing here is a secret.
+
+portal.example.com {
+	root * /var/www/homeserver-portal
+	file_server
+
+	# The page's security policy (security-policy.mjs). The page carries most
+	# of it itself; frame-ancestors and nosniff only work as headers.
+	header {
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https: http:; img-src 'self' data:; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+		Referrer-Policy no-referrer
+		X-Content-Type-Options nosniff
+		-Server
+	}
+
+	# The page and its invite links (/?token=...) are checked for a newer
+	# version each time; the config is never cached; the build output is named
+	# by its content, so it can be cached for good.
+	@page path / /index.html
+	header @page Cache-Control no-cache
+	header /config.json Cache-Control no-store
+	header /assets/* Cache-Control "public, max-age=31536000, immutable"
+}
