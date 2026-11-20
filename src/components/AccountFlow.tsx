@@ -4,6 +4,7 @@ import { type ReactNode, useState } from 'react';
 import { Activity, Server, UserRound } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { cn } from '@/lib/utils';
 import type { AccountConfig } from '../model';
 import { AccountTab } from './AccountTab';
 import { ActivityTab } from './ActivityTab';
@@ -11,29 +12,13 @@ import { HomeserverTab } from './HomeserverTab';
 import { PageFooter } from './PageFooter';
 import { PageHeader } from './PageHeader';
 import { useAccountFlow } from '../useAccountFlow';
-import { type Activity as ActivityData, useActivity } from '../useActivity';
-import { type OwnActivity, useOwnActivity } from '../useOwnActivity';
+import { useActivity } from '../useActivity';
+import { useOwnActivity } from '../useOwnActivity';
 import { useHomeserver } from '../useHomeserver';
 import { useProfile } from '../useProfile';
 import { usePublicFiles } from '../usePublicFiles';
 
-type Tab = 'account' | 'activity' | 'homeserver';
-
-const NO_ACTIVITY: ActivityData = {
-  feed: { status: 'idle' },
-  bursts: [],
-  people: [],
-  apps: [],
-  profiles: {},
-  refresh: () => undefined,
-};
-const NO_OWN_ACTIVITY: OwnActivity = {
-  status: 'idle',
-  events: [],
-  more: false,
-  loadingMore: false,
-  loadMore: () => undefined,
-};
+type Tab = 'homeserver' | 'account' | 'activity';
 
 interface AccountFlowProps {
   /** null: the page is not set up (no usable homeserver key configured). */
@@ -43,10 +28,10 @@ interface AccountFlowProps {
 }
 
 /**
- * The public page of a homeserver, in three tabs: the visitor's account
- * (sign up or sign in with Pubky Ring, then what they have here), the
- * homeserver's public activity, and facts about the homeserver. Nothing is
- * stored; reloading signs out.
+ * The public page of a homeserver, in tabs: facts about the homeserver, the
+ * visitor's account (sign up or sign in with Pubky Ring, then what they have
+ * here) and, once signed in, activity on the homeserver. Nothing is stored;
+ * reloading signs out.
  */
 export function AccountFlow({ config, initialCode }: AccountFlowProps) {
   return config ? <ConnectedTabs config={config} initialCode={initialCode} /> : <NotSetUpTabs />;
@@ -57,8 +42,9 @@ export function AccountFlow({ config, initialCode }: AccountFlowProps) {
  * keeps it all. A tab's data is read when it is first opened.
  */
 function ConnectedTabs({ config, initialCode }: { config: AccountConfig; initialCode: string }) {
-  const [tab, setTab] = useState<Tab>('account');
-  const [opened, setOpened] = useState<Set<Tab>>(() => new Set(['account']));
+  // An invite link is for signing up, so it opens on the Account tab.
+  const [tab, setTab] = useState<Tab>(initialCode ? 'account' : 'homeserver');
+  const [opened, setOpened] = useState<Set<Tab>>(() => new Set([tab]));
   const open = (next: string) => {
     setTab(next as Tab);
     setOpened((current) => (current.has(next as Tab) ? current : new Set(current).add(next as Tab)));
@@ -93,19 +79,20 @@ function ConnectedTabs({ config, initialCode }: { config: AccountConfig; initial
       <PageTabs
         value={tab}
         onChange={open}
-        account={<AccountTab flow={flow} files={files} profile={profile} />}
-        activity={
-          <ActivityTab
-            you={signedIn}
-            own={own}
-            everyone={everyone}
-            showAll={showAll}
-            onShowAll={() => setShowAll(true)}
-            onGoToAccount={() => open('account')}
-          />
-        }
         homeserver={
           <HomeserverTab homeserver={config.homeserver} state={homeserver} inviteRequired={flow.inviteRequired} />
+        }
+        account={<AccountTab flow={flow} files={files} profile={profile} />}
+        activity={
+          signedIn && (
+            <ActivityTab
+              you={signedIn}
+              own={own}
+              everyone={everyone}
+              showAll={showAll}
+              onShowAll={() => setShowAll(true)}
+            />
+          )
         }
       />
     </AccountPage>
@@ -113,24 +100,12 @@ function ConnectedTabs({ config, initialCode }: { config: AccountConfig; initial
 }
 
 function NotSetUpTabs() {
-  const [tab, setTab] = useState<Tab>('account');
+  const [tab, setTab] = useState<Tab>('homeserver');
   return (
     <AccountPage signedIn={null} onSignOut={() => undefined} onSignIn={null}>
       <PageTabs
         value={tab}
         onChange={(next) => setTab(next as Tab)}
-        account={<NotSetUp />}
-        activity={
-          <ActivityTab
-            you={null}
-            own={NO_OWN_ACTIVITY}
-            everyone={NO_ACTIVITY}
-            showAll={false}
-            onShowAll={() => undefined}
-            onGoToAccount={() => undefined}
-            notSetUp={<NotSetUp />}
-          />
-        }
         homeserver={
           <HomeserverTab
             homeserver=""
@@ -139,43 +114,34 @@ function NotSetUpTabs() {
             notSetUp={<NotSetUp />}
           />
         }
+        account={<NotSetUp />}
       />
     </AccountPage>
   );
 }
 
+/** The Activity tab is there only for a signed-in account holder: pass `activity` then. */
 function PageTabs({
   value,
   onChange,
+  homeserver,
   account,
   activity,
-  homeserver,
 }: {
   value: Tab;
   onChange: (tab: string) => void;
-  account: ReactNode;
-  activity: ReactNode;
   homeserver: ReactNode;
+  account: ReactNode;
+  activity?: ReactNode;
 }) {
   return (
     <Tabs value={value} onValueChange={onChange} className="w-full">
-      <TabsList className="flex w-full scrollbar-none flex-nowrap overflow-x-auto md:grid md:grid-cols-3">
-        <TabsTrigger
-          value="account"
-          className="shrink-0 gap-2 text-xs sm:text-sm [&_svg]:size-4"
-          data-testid="tab-account"
-        >
-          <UserRound className="shrink-0" />
-          Account
-        </TabsTrigger>
-        <TabsTrigger
-          value="activity"
-          className="shrink-0 gap-2 text-xs sm:text-sm [&_svg]:size-4"
-          data-testid="tab-activity"
-        >
-          <Activity className="shrink-0" />
-          Activity
-        </TabsTrigger>
+      <TabsList
+        className={cn(
+          'flex w-full scrollbar-none flex-nowrap overflow-x-auto md:grid',
+          activity ? 'md:grid-cols-3' : 'md:grid-cols-2',
+        )}
+      >
         <TabsTrigger
           value="homeserver"
           className="shrink-0 gap-2 text-xs sm:text-sm [&_svg]:size-4"
@@ -184,16 +150,36 @@ function PageTabs({
           <Server className="shrink-0" />
           Homeserver
         </TabsTrigger>
+        <TabsTrigger
+          value="account"
+          className="shrink-0 gap-2 text-xs sm:text-sm [&_svg]:size-4"
+          data-testid="tab-account"
+        >
+          <UserRound className="shrink-0" />
+          Account
+        </TabsTrigger>
+        {activity && (
+          <TabsTrigger
+            value="activity"
+            className="shrink-0 gap-2 text-xs sm:text-sm [&_svg]:size-4"
+            data-testid="tab-activity"
+          >
+            <Activity className="shrink-0" />
+            Activity
+          </TabsTrigger>
+        )}
       </TabsList>
-      <TabsContent value="account" className="space-y-4">
-        {account}
-      </TabsContent>
-      <TabsContent value="activity" className="space-y-4">
-        {activity}
-      </TabsContent>
       <TabsContent value="homeserver" className="space-y-4">
         {homeserver}
       </TabsContent>
+      <TabsContent value="account" className="space-y-4">
+        {account}
+      </TabsContent>
+      {activity && (
+        <TabsContent value="activity" className="space-y-4">
+          {activity}
+        </TabsContent>
+      )}
     </Tabs>
   );
 }

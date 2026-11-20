@@ -12,45 +12,17 @@ import type { OwnActivity } from '../useOwnActivity';
 import { Avatar } from './Avatar';
 
 interface ActivityTabProps {
-  /** The signed-in account holder's pubky; null shows the sign-in prompt instead. */
-  you: string | null;
+  /** The signed-in account holder's pubky. */
+  you: string;
   own: OwnActivity;
   everyone: Activity;
   /** Whether the homeserver-wide view was asked for. */
   showAll: boolean;
   onShowAll: () => void;
-  onGoToAccount: () => void;
-  /** The page is not set up: nothing can be shown. */
-  notSetUp?: React.ReactNode;
 }
 
 /** A signed-in person's own recent changes, and on request everyone's. */
-export function ActivityTab({ you, own, everyone, showAll, onShowAll, onGoToAccount, notSetUp }: ActivityTabProps) {
-  if (notSetUp || !you) {
-    return (
-      <Card data-testid="activity-tab">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base sm:text-lg">
-            <ActivityIcon className="size-5" />
-            Activity
-          </CardTitle>
-          <CardDescription className="text-xs sm:text-sm">
-            Your recent changes on this homeserver, and what everyone else has been up to.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {notSetUp ?? (
-            <div className="space-y-3" data-testid="activity-signin">
-              <p className="text-sm text-muted-foreground">Sign in with Pubky Ring to see activity.</p>
-              <Button variant="outline" onClick={onGoToAccount}>
-                Go to Account
-              </Button>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-    );
-  }
+export function ActivityTab({ you, own, everyone, showAll, onShowAll }: ActivityTabProps) {
   return (
     <>
       <Card data-testid="activity-tab">
