@@ -431,7 +431,7 @@ describe('AccountFlow page', () => {
 });
 
 describe('AccountFlow signed-in details', () => {
-  it('shows the profile and the files with the space they use', async () => {
+  it('shows the profile, and the space the public files take inside the account card', async () => {
     const client = homeserver();
     renderOnAccount();
     fireEvent.click(await screen.findByTestId('account-signin'));
@@ -439,39 +439,61 @@ describe('AccountFlow signed-in details', () => {
 
     expect((await screen.findByTestId('profile-name')).textContent).toBe('Alice');
     expect(screen.getByText('Hi there')).toBeTruthy();
-    await waitFor(() => expect(screen.getByTestId('files-summary').textContent).toContain('200 B'));
-    expect(screen.getByTestId('files-summary').textContent).toContain('in 2 public files');
-    expect(screen.getByTestId('files-by-app').textContent).toContain('pubky.app');
-    expect(screen.getByTestId('files-by-app').textContent).toContain('profile.json');
+    const space = await screen.findByTestId('space-used');
+    expect(screen.getByTestId('account-details').contains(space)).toBe(true);
+    await waitFor(() => expect(space.textContent).toContain('200 B'));
+    expect(space.textContent).toContain('in 2 public files');
+    expect(space.textContent).not.toContain('profile.json');
     expect(client.listPublicFiles).toHaveBeenCalledWith(ALICE);
     expect(client.profile).toHaveBeenCalledWith(ALICE);
   });
 
-  it('says so when there is no profile and nothing stored', async () => {
+  it('does not measure the files when the homeserver reports the storage itself', async () => {
+    const client = homeserver({
+      account: () => Promise.resolve({ pubky: ALICE, hasAccount: true, account: ALICE_ACCOUNT }),
+    });
+    renderOnAccount();
+    fireEvent.click(await screen.findByTestId('account-signin'));
+    await screen.findByTestId('account-storage');
+    expect(screen.queryByTestId('space-used')).toBeNull();
+    expect(client.listPublicFiles).not.toHaveBeenCalled();
+  });
+
+  it('says so when there is no profile, and counts nothing stored as no space', async () => {
     homeserver({ files: [], profile: null });
     renderOnAccount();
     fireEvent.click(await screen.findByTestId('account-signin'));
     await screen.findByTestId('profile-none');
-    await screen.findByTestId('files-none');
+    expect((await screen.findByTestId('space-used')).textContent).toContain('0 B');
   });
 
-  it('shows neither card for a pubky without an account here', async () => {
+  it('lets the welcome be dismissed, keeping the account below it', async () => {
+    homeserver();
+    renderOnAccount();
+    fireEvent.click(await screen.findByTestId('account-signin'));
+    await screen.findByText('Welcome back');
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    expect(screen.queryByTestId('account-greeting')).toBeNull();
+    expect(screen.getByTestId('account-pubky')).toBeTruthy();
+  });
+
+  it('shows no profile for a pubky without an account here', async () => {
     homeserver({ account: () => Promise.resolve({ pubky: ALICE, hasAccount: false }) });
     renderOnAccount();
     fireEvent.click(await screen.findByTestId('account-signin'));
     await screen.findByTestId('account-missing');
     expect(screen.queryByTestId('profile-card')).toBeNull();
-    expect(screen.queryByTestId('files-card')).toBeNull();
+    expect(screen.queryByTestId('space-used')).toBeNull();
   });
 
-  it('removes the cards again on sign-out', async () => {
+  it('removes the profile again on sign-out', async () => {
     homeserver();
     renderOnAccount();
     fireEvent.click(await screen.findByTestId('account-signin'));
-    await screen.findByTestId('files-card');
+    await screen.findByTestId('profile-card');
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     await screen.findByTestId('account-signin');
-    expect(screen.queryByTestId('files-card')).toBeNull();
+    expect(screen.queryByTestId('profile-card')).toBeNull();
   });
 });
 

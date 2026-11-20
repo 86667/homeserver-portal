@@ -9,18 +9,18 @@ import type { PublicFiles } from '../usePublicFiles';
 import { describeOutcome } from '../outcome';
 import { AccountDetails } from './AccountDetails';
 import { ErrorPanel } from './ErrorPanel';
-import { FilesCard } from './FilesCard';
 import { ProfileCard } from './ProfileCard';
 import { StartStep } from './StartStep';
 import { WaitingStep } from './WaitingStep';
 
 interface AccountTabProps {
   flow: ReturnType<typeof useAccountFlow>;
+  /** The person's public files, measured when the homeserver does not report their storage itself. */
   files: PublicFiles;
   profile: ProfileState;
 }
 
-/** The account tab: the sign-up/sign-in card, and once signed in, the person's profile and files. */
+/** The account tab: the sign-up/sign-in card, and once signed in, the person's profile. */
 export function AccountTab({ flow, files, profile }: AccountTabProps) {
   const signedIn = flow.step.name === 'done' && flow.step.info.hasAccount;
   return (
@@ -36,16 +36,15 @@ export function AccountTab({ flow, files, profile }: AccountTabProps) {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <Steps flow={flow} />
+          <Steps flow={flow} files={files} />
         </CardContent>
       </Card>
       {signedIn && <ProfileCard state={profile} />}
-      {signedIn && <FilesCard state={files} />}
     </>
   );
 }
 
-function Steps({ flow }: { flow: ReturnType<typeof useAccountFlow> }) {
+function Steps({ flow, files }: Pick<AccountTabProps, 'flow' | 'files'>) {
   const { step, invite, inviteRequired, canSignUp, start, backToStart, retryConnect } = flow;
   switch (step.name) {
     case 'connecting':
@@ -79,6 +78,7 @@ function Steps({ flow }: { flow: ReturnType<typeof useAccountFlow> }) {
         <AccountDetails
           outcome={describeOutcome(step.kind, step.info, step.inviteStatus)}
           info={step.info}
+          files={files}
           onSignOut={backToStart}
         />
       );

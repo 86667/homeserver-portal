@@ -3,7 +3,7 @@ import type { HomeserverClient } from './homeserver-client';
 import type { PublicFile } from './model';
 
 /** Files whose size is read; beyond this the rest are listed without one. */
-const MAX_MEASURED = 2000;
+export const MAX_MEASURED = 2000;
 /** HEAD requests in flight at once: quick, and well under the homeserver's limits. */
 const CONCURRENCY = 4;
 
@@ -15,8 +15,9 @@ export type PublicFiles =
 
 /**
  * A person's public files on this homeserver, with their sizes as they come
- * in: the listing names files only, so each size is a HEAD request, a few at
- * a time. Idle until there is a client and a pubky.
+ * in, to total the space they take: the listing names files only, so each
+ * size is a HEAD request, a few at a time. Idle until there is a client and
+ * a pubky.
  */
 export function usePublicFiles(client: HomeserverClient | null, pubky: string | null): PublicFiles {
   const [state, setState] = useState<PublicFiles>({ status: 'idle' });
@@ -65,24 +66,8 @@ export function usePublicFiles(client: HomeserverClient | null, pubky: string | 
   return state;
 }
 
-/** Totals over files whose size is known. */
-export function summarize(files: PublicFile[]): {
-  bytes: number;
-  sized: number;
-  byApp: Map<string, { files: number; bytes: number }>;
-} {
-  const byApp = new Map<string, { files: number; bytes: number }>();
-  let bytes = 0;
-  let sized = 0;
-  for (const file of files) {
-    const app = byApp.get(file.app) ?? { files: 0, bytes: 0 };
-    app.files += 1;
-    if (file.size !== undefined) {
-      app.bytes += file.size;
-      bytes += file.size;
-      sized += 1;
-    }
-    byApp.set(file.app, app);
-  }
-  return { bytes, sized, byApp };
+/** The space the files take and how many of them have a known size. */
+export function summarize(files: PublicFile[]): { bytes: number; sized: number } {
+  const sizes = files.flatMap((file) => (file.size === undefined ? [] : [file.size]));
+  return { bytes: sizes.reduce((total, size) => total + size, 0), sized: sizes.length };
 }

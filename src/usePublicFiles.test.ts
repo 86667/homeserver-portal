@@ -75,18 +75,8 @@ describe('usePublicFiles', () => {
 });
 
 describe('summarize', () => {
-  it('totals known sizes by app and overall', () => {
-    const files: PublicFile[] = [
-      { ...file('pubky.app/profile.json'), size: 140 },
-      { ...file('pubky.app/posts/1'), size: 60 },
-      { ...file('notes/x') },
-    ];
-    const summary = summarize(files);
-    expect(summary.bytes).toBe(200);
-    expect(summary.sized).toBe(2);
-    expect([...summary.byApp.entries()]).toEqual([
-      ['pubky.app', { files: 2, bytes: 200 }],
-      ['notes', { files: 1, bytes: 0 }],
-    ]);
+  it('totals the known sizes and counts them', () => {
+    const files = [{ ...file('a/1'), size: 10 }, { ...file('a/2'), size: 5 }, file('b/1')];
+    expect(summarize(files)).toEqual({ bytes: 15, sized: 2 });
   });
 });

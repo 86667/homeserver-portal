@@ -51,7 +51,9 @@ function ConnectedTabs({ config, initialCode }: { config: AccountConfig; initial
 
   const flow = useAccountFlow(config, initialCode);
   const signedIn = flow.step.name === 'done' && flow.step.info.hasAccount ? flow.step.info.pubky : null;
-  const files = usePublicFiles(flow.client, signedIn);
+  // The files are only measured to say what space they take, which a homeserver that reports the account says itself.
+  const reported = flow.step.name === 'done' && flow.step.info.hasAccount && flow.step.info.account !== undefined;
+  const files = usePublicFiles(flow.client, reported ? null : signedIn);
   const profile = useProfile(flow.client, signedIn);
   const own = useOwnActivity(flow.client, signedIn, opened.has('activity'));
   const homeserver = useHomeserver(flow.client, opened.has('homeserver'));
