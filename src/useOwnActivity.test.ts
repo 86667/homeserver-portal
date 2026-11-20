@@ -10,7 +10,6 @@ const event = (n: number): FeedEvent => ({
   url: `pubky://${ALICE}/pub/a/${n}`,
   pubky: ALICE,
   path: `a/${n}`,
-  app: 'a',
 });
 /** A homeserver with `total` events, served newest first in pages. */
 function client(total: number) {
@@ -38,13 +37,45 @@ describe('useOwnActivity', () => {
     expect(result.current.events).toHaveLength(OWN_PAGE);
     expect(result.current.events[0].path).toBe(`a/${OWN_PAGE + 3}`);
     expect(result.current.more).toBe(true);
-    expect(c.ownEvents).toHaveBeenCalledWith(ALICE, null, OWN_PAGE);
+    expect(c.ownEvents).toHaveBeenCalledWith(ALICE, null, OWN_PAGE, '');
 
     act(() => result.current.loadMore());
     await waitFor(() => expect(result.current.events).toHaveLength(OWN_PAGE + 3));
-    expect(c.ownEvents).toHaveBeenLastCalledWith(ALICE, '4', OWN_PAGE);
+    expect(c.ownEvents).toHaveBeenLastCalledWith(ALICE, '4', OWN_PAGE, '');
     expect(result.current.more).toBe(false);
     expect(result.current.events[OWN_PAGE + 2].path).toBe('a/1');
+  });
+
+  it("groups the events by folder, keeping each group's id as older pages arrive", async () => {
+    const c = client(OWN_PAGE + 3);
+    const { result } = renderHook(() => useOwnActivity(c, ALICE, true));
+    await waitFor(() => expect(result.current.status).toBe('done'));
+    expect(result.current.folders).toEqual([{ folder: 'a', changes: OWN_PAGE }]);
+    expect(result.current.bursts.map((b) => [b.id, b.folder, b.written])).toEqual([[0, 'a', OWN_PAGE]]);
+    act(() => result.current.loadMore());
+    await waitFor(() => expect(result.current.events).toHaveLength(OWN_PAGE + 3));
+    expect(result.current.bursts.map((b) => [b.id, b.folder, b.written])).toEqual([[0, 'a', OWN_PAGE + 3]]);
+  });
+
+  it('starts again from the newest page for a filter, a cleared filter and a refresh', async () => {
+    const c = client(OWN_PAGE + 3);
+    const { result } = renderHook(() => useOwnActivity(c, ALICE, true));
+    await waitFor(() => expect(result.current.status).toBe('done'));
+    act(() => result.current.loadMore());
+    await waitFor(() => expect(result.current.events).toHaveLength(OWN_PAGE + 3));
+
+    act(() => result.current.filterBy(' /pub/a/posts/ '));
+    await waitFor(() => expect(result.current.status).toBe('done'));
+    expect(result.current.path).toBe('a/posts');
+    expect(c.ownEvents).toHaveBeenLastCalledWith(ALICE, null, OWN_PAGE, 'a/posts');
+    expect(result.current.events).toHaveLength(OWN_PAGE);
+
+    act(() => result.current.filterBy(''));
+    await waitFor(() => expect(c.ownEvents).toHaveBeenLastCalledWith(ALICE, null, OWN_PAGE, ''));
+    await waitFor(() => expect(result.current.status).toBe('done'));
+    const calls = vi.mocked(c.ownEvents).mock.calls.length;
+    act(() => result.current.refresh());
+    await waitFor(() => expect(c.ownEvents).toHaveBeenCalledTimes(calls + 1));
   });
 
   it('starts over for another person, and empties on sign-out', async () => {
@@ -53,9 +84,12 @@ describe('useOwnActivity', () => {
       initialProps: { pubky: ALICE as string | null },
     });
     await waitFor(() => expect(result.current.events).toHaveLength(2));
+    act(() => result.current.filterBy('a'));
+    await waitFor(() => expect(result.current.path).toBe('a'));
     rerender({ pubky: null });
     expect(result.current.status).toBe('idle');
     expect(result.current.events).toHaveLength(0);
+    expect(result.current.path).toBe('');
   });
 
   it('reports a failure', async () => {

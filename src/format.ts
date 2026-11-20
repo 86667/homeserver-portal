@@ -27,11 +27,6 @@ export function formatDateTime(date: Date): string {
   });
 }
 
-/** A pubky short enough for a label: its first and last characters. */
-export function shortPubky(pubky: string): string {
-  return pubky.length > 12 ? `${pubky.slice(0, 6)}…${pubky.slice(-4)}` : pubky;
-}
-
 /** How long ago, in round words: "less than a minute ago", "5 hours ago", "6 days ago". */
 export function formatAge(ms: number): string {
   const minutes = Math.floor(ms / 60_000);

@@ -12,7 +12,6 @@ import { HomeserverTab } from './HomeserverTab';
 import { PageFooter } from './PageFooter';
 import { PageHeader } from './PageHeader';
 import { useAccountFlow } from '../useAccountFlow';
-import { useActivity } from '../useActivity';
 import { useOwnActivity } from '../useOwnActivity';
 import { useHomeserver } from '../useHomeserver';
 import { useProfile } from '../useProfile';
@@ -30,7 +29,7 @@ interface AccountFlowProps {
 /**
  * The public page of a homeserver, in tabs: facts about the homeserver, the
  * visitor's account (sign up or sign in with Pubky Ring, then what they have
- * here) and, once signed in, activity on the homeserver. Nothing is stored;
+ * here) and, once signed in, their own activity on it. Nothing is stored;
  * reloading signs out.
  */
 export function AccountFlow({ config, initialCode }: AccountFlowProps) {
@@ -55,14 +54,10 @@ function ConnectedTabs({ config, initialCode }: { config: AccountConfig; initial
   const files = usePublicFiles(flow.client, signedIn);
   const profile = useProfile(flow.client, signedIn);
   const own = useOwnActivity(flow.client, signedIn, opened.has('activity'));
-  // Everyone's activity costs a feed read and a dozen profile reads: only on request, and only for account holders.
-  const [showAll, setShowAll] = useState(false);
-  const everyone = useActivity(flow.client, showAll && signedIn !== null);
   const homeserver = useHomeserver(flow.client, opened.has('homeserver'));
   // Back where the sign-in is, whichever tab the person was on.
   const signOut = () => {
     flow.backToStart();
-    setShowAll(false);
     setTab('account');
   };
   // The header's sign-in: the QR code appears on the Account tab.
@@ -83,17 +78,7 @@ function ConnectedTabs({ config, initialCode }: { config: AccountConfig; initial
           <HomeserverTab homeserver={config.homeserver} state={homeserver} inviteRequired={flow.inviteRequired} />
         }
         account={<AccountTab flow={flow} files={files} profile={profile} />}
-        activity={
-          signedIn && (
-            <ActivityTab
-              you={signedIn}
-              own={own}
-              everyone={everyone}
-              showAll={showAll}
-              onShowAll={() => setShowAll(true)}
-            />
-          )
-        }
+        activity={signedIn && <ActivityTab own={own} />}
       />
     </AccountPage>
   );

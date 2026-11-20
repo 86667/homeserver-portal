@@ -29,7 +29,6 @@ const feedEvent = (kind: 'PUT' | 'DEL', pubky: string, path: string): FeedEvent 
   url: `pubky://${pubky}/pub/${path}`,
   pubky,
   path,
-  app: path.includes('/') ? path.slice(0, path.indexOf('/')) : '',
 });
 const BOB = 'o1gg96ewuojmopcjbz8895478wdtxtzzuxnfjjz8o8e77csa1ngo';
 
@@ -69,9 +68,8 @@ function homeserver({
     listPublicFiles: vi.fn(async () => ({ files: files.map(({ size: _, ...f }) => ({ ...f })), more: false })),
     fileStats: vi.fn(async (f: PublicFile) => ({ size: files.find((x) => x.path === f.path)?.size ?? 0 })),
     profile: vi.fn(async (pubky: string) => (pubky === ALICE ? profile : null)),
-    latestEvents: vi.fn(async () => ({ events, cursor: String(events.length), total: events.length })),
-    ownEvents: vi.fn(async (pubky: string, cursor: string | null) => {
-      const mine = events.filter((e) => e.pubky === pubky).reverse();
+    ownEvents: vi.fn(async (pubky: string, cursor: string | null, _limit: number, path = '') => {
+      const mine = events.filter((e) => e.pubky === pubky && e.path.startsWith(path)).reverse();
       return cursor === null ? { events: mine, cursor: '1' } : { events: [], cursor: null };
     }),
     info: vi.fn(async () => ({ features: ['webdav-locks', 'something-new'], address: 'https://hs.example.com' })),
@@ -258,7 +256,6 @@ describe('AccountFlow tabs', () => {
     fireEvent.mouseDown(screen.getByTestId('tab-account'));
     expect(await screen.findByTestId('account-signin')).toBeTruthy();
     expect(client.ownEvents).not.toHaveBeenCalled();
-    expect(client.latestEvents).not.toHaveBeenCalled();
   });
 
   it('opens an invite link on the Account tab, and reads the homeserver only when its tab is opened', async () => {
@@ -317,30 +314,51 @@ describe('AccountFlow activity tab', () => {
     fireEvent.mouseDown(screen.getByTestId('tab-activity'));
 
     const list = await screen.findByTestId('own-events');
-    expect(list.querySelectorAll('li')).toHaveLength(12);
-    expect(list.textContent).toContain('posts/12');
-    expect(client.ownEvents).toHaveBeenCalledWith(ALICE, null, 10);
-    expect(client.latestEvents).not.toHaveBeenCalled();
+    // One folder, so one group, already open on its twelve files.
+    expect(list.querySelectorAll('details[open]')).toHaveLength(1);
+    expect(list.querySelectorAll('details li')).toHaveLength(12);
+    expect(list.textContent).toContain('pubky.app/posts');
+    expect(screen.getByTestId('own-summary').textContent).toContain('1 folder');
+    expect(client.ownEvents).toHaveBeenCalledWith(ALICE, null, 10, '');
   });
 
-  it('shows everyone only on request, with names from profiles and the visitor marked', async () => {
-    const client = homeserver();
+  it("filters the person's changes by a typed path or a chosen folder, and clears the filter", async () => {
+    const client = homeserver({
+      events: [
+        feedEvent('PUT', ALICE, 'site/index.html'),
+        feedEvent('PUT', ALICE, 'pubky.app/posts/1'),
+        feedEvent('DEL', ALICE, 'pubky.app/posts/1'),
+      ],
+    });
     renderOnAccount();
     fireEvent.click(await screen.findByTestId('account-signin'));
     await screen.findByText('Welcome back');
     fireEvent.mouseDown(screen.getByTestId('tab-activity'));
-    await screen.findByTestId('own-events');
-    fireEvent.click(screen.getByTestId('activity-show-all'));
+    const folders = await screen.findByTestId('own-folders');
+    expect(folders.textContent).toContain('pubky.app/posts2');
+    expect(folders.textContent).toContain('site1');
 
-    const summary = await screen.findByTestId('activity-summary');
-    expect(summary.textContent).toContain('2 people');
-    const people = screen.getByTestId('activity-people');
-    await waitFor(() => expect(people.textContent).toContain('Alice'));
-    expect(people.textContent).toContain('you');
-    expect(people.textContent).toContain('o1gg96…1ngo');
-    expect(screen.getByTestId('activity-bursts').querySelectorAll('details')).toHaveLength(2);
-    expect(client.profile).toHaveBeenCalledWith(BOB, false);
-    expect(client.latestEvents).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: /pubky\.app\/posts/ }));
+    await waitFor(() => expect(client.ownEvents).toHaveBeenLastCalledWith(ALICE, null, 10, 'pubky.app/posts'));
+    const input = screen.getByLabelText('Filter by file or folder') as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe('pubky.app/posts'));
+    await waitFor(() => expect(screen.getByTestId('own-folders').textContent).not.toContain('site'));
+
+    fireEvent.change(screen.getByLabelText('Filter by file or folder'), { target: { value: '/pub/nothing/' } });
+    fireEvent.submit(screen.getByTestId('own-filter'));
+    expect((await screen.findByTestId('own-none')).textContent).toContain('at nothing');
+
+    fireEvent.click(screen.getByTestId('own-filter-clear'));
+    await waitFor(() => expect(client.ownEvents).toHaveBeenLastCalledWith(ALICE, null, 10, ''));
+    expect(await screen.findByTestId('own-folders')).toBeTruthy();
+
+    // The chosen folder is marked, and choosing it again takes the filter away.
+    fireEvent.click(await screen.findByRole('button', { name: /^site/ }));
+    await waitFor(() => expect(client.ownEvents).toHaveBeenLastCalledWith(ALICE, null, 10, 'site'));
+    const chosen = await screen.findByRole('button', { name: /^site/, pressed: true });
+    fireEvent.click(chosen);
+    await waitFor(() => expect(client.ownEvents).toHaveBeenLastCalledWith(ALICE, null, 10, ''));
+    expect(await screen.findByRole('button', { name: /^site/, pressed: false })).toBeTruthy();
   });
 
   it('says when the person has not changed anything yet', async () => {

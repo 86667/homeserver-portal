@@ -394,18 +394,6 @@ describe('fileStats', () => {
   });
 });
 
-describe('profile without avatar', () => {
-  it('reads the name but not the image', async () => {
-    homeserver({
-      [`GET ${BASE}/storage/${ALICE}/pub/pubky.app/profile.json`]: () =>
-        json({ name: 'Alice', image: 'https://example.com/a.png' }),
-    });
-    const client = await HomeserverClient.connect(config);
-    expect(await client.profile(ALICE, false)).toMatchObject({ name: 'Alice', avatar: null });
-    expect(sdk.clientFetch).toHaveBeenCalledTimes(1);
-  });
-});
-
 describe('profile', () => {
   const url = `GET https://${HOMESERVER}/storage/${ALICE}/pub/pubky.app/profile.json`;
 
@@ -524,50 +512,6 @@ describe('homeserverRecord', () => {
   });
 });
 
-describe('latestEvents', () => {
-  it('reads a feed that fits in one page, keeping the newest events', async () => {
-    const lines = [feedLine('PUT', ALICE, 'a'), feedLine('PUT', ALICE, 'b'), feedLine('DEL', ALICE, 'a')];
-    homeserver({ [`GET ${BASE}/events/?cursor=0&limit=1000`]: () => feed(lines, 3) });
-    const client = await HomeserverClient.connect(config);
-    const result = await client.latestEvents(2);
-    expect(result.cursor).toBe('3');
-    expect(result.total).toBe(3);
-    expect(result.events.map((e) => `${e.kind} ${e.path}`)).toEqual(['PUT b', 'DEL a']);
-  });
-
-  it('is empty for an empty feed', async () => {
-    homeserver({ [`GET ${BASE}/events/?cursor=0&limit=1000`]: () => feed([], null) });
-    const client = await HomeserverClient.connect(config);
-    expect(await client.latestEvents(5)).toEqual({ events: [], cursor: '0', total: 0 });
-  });
-
-  it('finds the end of a long feed with a few probes and reads the window before it', async () => {
-    const LAST = 2345; // events at positions 1..LAST
-    const page = (cursor: number, limit: number) => {
-      const positions = Array.from({ length: limit }, (_, i) => cursor + 1 + i).filter((p) => p <= LAST);
-      return feed(
-        positions.map((p) => feedLine('PUT', ALICE, `f${p}`)),
-        positions.length ? positions[positions.length - 1] : null,
-      );
-    };
-    const requests: string[] = [];
-    sdk.clientFetch.mockImplementation(async (url: string) => {
-      requests.push(url);
-      const query = new URL(url).searchParams;
-      return page(Number(query.get('cursor')), Number(query.get('limit')));
-    });
-    const client = await HomeserverClient.connect(config);
-    const result = await client.latestEvents(100);
-    expect(result.total).toBeNull();
-    expect(result.cursor).toBe(String(LAST));
-    expect(result.events).toHaveLength(100);
-    expect(result.events[99].path).toBe(`f${LAST}`);
-    expect(result.events[0].path).toBe(`f${LAST - 99}`);
-    expect(requests.length).toBeLessThan(20);
-    expect(requests.filter((u) => u.includes('limit=1000'))).toHaveLength(1);
-  });
-});
-
 describe('ownEvents', () => {
   it('asks the event stream for the newest events, then for the ones before a cursor', async () => {
     const sse = (id: number) => `event: PUT\ndata: pubky://${ALICE}/pub/a/${id}\ndata: cursor: ${id}\n\n`;
@@ -582,12 +526,15 @@ describe('ownEvents', () => {
     const next = await client.ownEvents(ALICE, first.cursor, 2);
     expect(next.events.map((e) => e.path)).toEqual(['a/7']);
   });
-});
 
-describe('eventsAfter', () => {
-  it('fails on a refusal', async () => {
-    homeserver({ [`GET ${BASE}/events/?cursor=9&limit=50`]: () => new Response('nope', { status: 500 }) });
+  it('asks for a path as a file and as a folder', async () => {
+    const paths = 'path=%2Fpub%2Fpubky.app%2Fposts&path=%2Fpub%2Fpubky.app%2Fposts%2F';
+    homeserver({
+      [`GET ${BASE}/events-stream?user=${ALICE}&reverse=true&limit=2&${paths}`]: () =>
+        new Response(`event: DEL\ndata: pubky://${ALICE}/pub/pubky.app/posts/1\ndata: cursor: 5\n\n`),
+    });
     const client = await HomeserverClient.connect(config);
-    await expect(client.eventsAfter('9', 50)).rejects.toThrow('could not list its events (500)');
+    const page = await client.ownEvents(ALICE, null, 2, 'pubky.app/posts');
+    expect(page.events.map((e) => `${e.kind} ${e.path}`)).toEqual(['DEL pubky.app/posts/1']);
   });
 });

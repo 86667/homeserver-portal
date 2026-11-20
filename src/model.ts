@@ -111,7 +111,7 @@ export function isInviteCode(code: string): boolean {
   return INVITE_CODE.test(code);
 }
 
-/** One line of the homeserver's public event feed: a public file written or removed. */
+/** One event of the homeserver's stream: a public file written or removed. */
 export type FeedEvent = {
   kind: 'PUT' | 'DEL';
   /** The file's `pubky://` address. */
@@ -120,8 +120,6 @@ export type FeedEvent = {
   pubky: string;
   /** Its path under `/pub/`. */
   path: string;
-  /** The first folder under `/pub/`: by convention the app that wrote the file. */
-  app: string;
 };
 
 /** What the homeserver says about itself on `GET /info`, and where it was reached. */

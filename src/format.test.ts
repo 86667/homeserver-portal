@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatAge, formatBytes, formatDate, formatDateTime, shortPubky } from './format';
+import { formatAge, formatBytes, formatDate, formatDateTime } from './format';
 
 describe('formatBytes', () => {
   it.each([
@@ -19,13 +19,6 @@ describe('formatBytes', () => {
 describe('formatDate', () => {
   it('shows day, month and year', () => {
     expect(formatDate(new Date(2026, 9, 21))).toMatch(/21.*Oct.*2026|Oct.*21.*2026/);
-  });
-});
-
-describe('shortPubky', () => {
-  it('keeps the ends of a key', () => {
-    expect(shortPubky('whgxto9xtroaih7ict9chtuxh1xmbpmci5qd71jsen3ow3bscipy')).toBe('whgxto…cipy');
-    expect(shortPubky('short')).toBe('short');
   });
 });
 
