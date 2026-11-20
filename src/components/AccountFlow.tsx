@@ -58,14 +58,12 @@ function ConnectedTabs({ config, initialCode }: { config: AccountConfig; initial
     flow.backToStart();
     setTab('account');
   };
-  // The header's sign-in: the QR code appears on the Account tab.
-  const signIn =
-    flow.step.name === 'start'
-      ? () => {
-          open('account');
-          void flow.start('signin');
-        }
-      : null;
+  // The header's sign-in, there until someone is signed in: it opens the Account tab, and starts a
+  // sign-in unless the page is past its start already (a QR code on show, say), which it leaves as it is.
+  const signIn = () => {
+    open('account');
+    if (flow.step.name === 'start') void flow.start('signin');
+  };
 
   return (
     <AccountPage signedIn={signedIn} onSignOut={signOut} onSignIn={signIn}>

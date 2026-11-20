@@ -65,8 +65,11 @@ describe('useOwnActivity', () => {
     await waitFor(() => expect(result.current.events).toHaveLength(OWN_PAGE + 3));
 
     act(() => result.current.filterBy(' /pub/a/posts/ '));
-    await waitFor(() => expect(result.current.status).toBe('done'));
-    expect(result.current.path).toBe('a/posts');
+    // The last read's events stay on show, under the filter they were read with, until the new read answers.
+    expect(result.current).toMatchObject({ status: 'done', refreshing: true, path: 'a/posts', shownPath: '' });
+    expect(result.current.events).toHaveLength(OWN_PAGE + 3);
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+    expect(result.current.shownPath).toBe('a/posts');
     expect(c.ownEvents).toHaveBeenLastCalledWith(ALICE, null, OWN_PAGE, 'a/posts');
     expect(result.current.events).toHaveLength(OWN_PAGE);
 

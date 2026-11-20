@@ -1,7 +1,8 @@
 import type { AccountInfo, InviteStatus } from './model';
 import type { RingRequestKind } from './homeserver-client';
 
-export type Outcome = { hasAccount: boolean; title: string; text: string };
+/** `text` is left out where the title says it all. */
+export type Outcome = { hasAccount: boolean; title: string; text?: string };
 
 const SIGNED_UP: Outcome = {
   hasAccount: true,
@@ -15,7 +16,7 @@ const ALREADY_SIGNED_UP: Outcome = {
   text: 'Ring approved with a pubky that is already signed up on this homeserver, so no new account was made. Your invite code is still unused.',
 };
 
-const SIGNED_IN: Outcome = { hasAccount: true, title: 'Welcome back', text: 'You have an account on this homeserver.' };
+const SIGNED_IN: Outcome = { hasAccount: true, title: 'Welcome back' };
 
 /** Whether the account is new is unknown: no code was used (open sign-ups), or its status could not be read. */
 const HAS_ACCOUNT: Outcome = {

@@ -388,15 +388,19 @@ describe('AccountFlow page', () => {
     let approve: (info: AccountInfo) => void = () => undefined;
     const client = homeserver({ account: () => new Promise<AccountInfo>((resolve) => (approve = resolve)) });
     renderOnAccount();
-    expect(screen.queryByTestId('header-signin')).toBeNull(); // still connecting
     await screen.findByTestId('account-signin');
     fireEvent.mouseDown(screen.getByTestId('tab-homeserver'));
     await screen.findByTestId('homeserver-key');
     fireEvent.click(screen.getByTestId('header-signin'));
     expect(await screen.findByTestId('account-qr')).toBeTruthy();
-    approve({ pubky: ALICE, hasAccount: true });
-    expect(screen.queryByTestId('header-signin')).toBeNull(); // one at a time
+    // With a sign-in under way the button stays, and only leads back to its QR code.
+    fireEvent.mouseDown(screen.getByTestId('tab-homeserver'));
+    await screen.findByTestId('homeserver-key');
+    fireEvent.click(screen.getByTestId('header-signin'));
+    expect(await screen.findByTestId('account-qr')).toBeTruthy();
+    expect(client.startRequest).toHaveBeenCalledTimes(1);
     expect(client.startRequest).toHaveBeenCalledWith('signin', null);
+    approve({ pubky: ALICE, hasAccount: true });
     await screen.findByText('Welcome back');
     expect(screen.getByTestId('sign-out')).toBeTruthy();
   });

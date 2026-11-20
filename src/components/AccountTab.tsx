@@ -28,9 +28,7 @@ export function AccountTab({ flow, profile }: AccountTabProps) {
             <UserRound className="size-5" />
             Your account
           </CardTitle>
-          <CardDescription>
-            Create a Pubky account on this homeserver, or sign in to yours. Your keys stay in Pubky Ring on your phone.
-          </CardDescription>
+          <CardDescription>Create a Pubky account on this homeserver, or sign in to yours.</CardDescription>
         </CardHeader>
         <CardContent>
           <Steps flow={flow} />

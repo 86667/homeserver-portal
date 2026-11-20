@@ -15,7 +15,10 @@ export function ProfileCard({ state }: { state: ProfileState }) {
           <IdCard className="size-5" />
           Your profile
         </CardTitle>
-        <CardDescription>What pubky.app shows about you, as stored in your public files here.</CardDescription>
+        <CardDescription>
+          Your name, picture, bio and links. Your profile is a public file you own on this homeserver, and Pubky apps
+          read it to show who you are.
+        </CardDescription>
       </CardHeader>
       <CardContent>
         <ProfileBody state={state} />

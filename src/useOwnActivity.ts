@@ -13,6 +13,10 @@ type Pages = {
   /** Whether an older page may exist. */
   more: boolean;
   loadingMore: boolean;
+  /** Whether a newer read is under way while the last one's events stay on show. */
+  refreshing: boolean;
+  /** The filter the events on show were read with, which trails `path` while refreshing. */
+  shownPath: string;
   /** When the first page was read. */
   checkedAt: Date | null;
   message?: string;
@@ -54,7 +58,12 @@ export function useOwnActivity(client: HomeserverClient | null, pubky: string | 
     const mine = {};
     read.current = mine;
     cursor.current = null;
-    setPages({ ...IDLE, status: 'loading' });
+    // What is on show stays until the new read answers, so a filter or refresh does not blank the list.
+    setPages((current) =>
+      current.status === 'done'
+        ? { ...current, refreshing: true, loadingMore: false, message: undefined }
+        : { ...IDLE, status: 'loading' },
+    );
     client
       .ownEvents(pubky, null, OWN_PAGE, path)
       .then((page) => {
@@ -65,6 +74,8 @@ export function useOwnActivity(client: HomeserverClient | null, pubky: string | 
           events: page.events,
           more: page.events.length === OWN_PAGE,
           loadingMore: false,
+          refreshing: false,
+          shownPath: path,
           checkedAt: new Date(),
         });
       })
@@ -77,7 +88,7 @@ export function useOwnActivity(client: HomeserverClient | null, pubky: string | 
   }, [client, pubky, enabled, path, reads]);
 
   const loadMore = useCallback(() => {
-    if (!client || !pubky || pages.status !== 'done' || !pages.more || pages.loadingMore) return;
+    if (!client || !pubky || pages.status !== 'done' || pages.refreshing || !pages.more || pages.loadingMore) return;
     const mine = read.current;
     setPages((current) => ({ ...current, loadingMore: true, message: undefined }));
     client
@@ -96,7 +107,7 @@ export function useOwnActivity(client: HomeserverClient | null, pubky: string | 
         if (read.current === mine)
           setPages((current) => ({ ...current, loadingMore: false, message: messageOf(error) }));
       });
-  }, [client, pubky, path, pages.status, pages.more, pages.loadingMore]);
+  }, [client, pubky, path, pages.status, pages.refreshing, pages.more, pages.loadingMore]);
 
   const filterBy = useCallback((typed: string) => setPath(pathUnderPub(typed)), []);
   const refresh = useCallback(() => setReads((n) => n + 1), []);
@@ -107,5 +118,13 @@ export function useOwnActivity(client: HomeserverClient | null, pubky: string | 
   return { ...pages, bursts, folders, path, loadMore, filterBy, refresh };
 }
 
-const IDLE: Pages = { status: 'idle', events: [], more: false, loadingMore: false, checkedAt: null };
+const IDLE: Pages = {
+  status: 'idle',
+  events: [],
+  more: false,
+  loadingMore: false,
+  refreshing: false,
+  shownPath: '',
+  checkedAt: null,
+};
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));

@@ -7,7 +7,7 @@ interface PageHeaderProps {
   /** The signed-in person's pubky, to offer signing out; null when nobody is. */
   signedIn: string | null;
   onSignOut: () => void;
-  /** Starts a sign-in with Ring; null when none can start right now (connecting, or one is under way). */
+  /** Takes the visitor to signing in with Ring; null on a page with no homeserver to sign in to. */
   onSignIn: (() => void) | null;
 }
 

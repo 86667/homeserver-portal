@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
+import { cn } from '@/lib/utils';
 import type { Burst } from '../activity';
 import { formatDateTime } from '../format';
 import { OWN_PAGE, type OwnActivity } from '../useOwnActivity';
@@ -27,7 +28,13 @@ export function ActivityTab({ own }: { own: OwnActivity }) {
       <CardContent className="space-y-4">
         {/* Keyed by the filter, so choosing a folder below also fills the box. */}
         <PathFilter key={own.path} path={own.path} onFilter={own.filterBy} />
-        <OwnBody own={own} />
+        {/* What is on show dims while a newer read is under way, and is swapped in place when it answers. */}
+        <div
+          className={cn('transition-opacity duration-200', own.refreshing && 'opacity-50')}
+          aria-busy={own.refreshing}
+        >
+          <OwnBody own={own} />
+        </div>
       </CardContent>
     </Card>
   );
@@ -48,14 +55,15 @@ function PathFilter({ path, onFilter }: { path: string; onFilter: (path: string)
         aria-label="Filter by file or folder"
         className="font-mono text-xs md:text-xs"
       />
-      <Button type="submit" variant="outline" size="sm">
-        Filter
-      </Button>
+      {/* Before "Filter", which then stays where it is when this appears. */}
       {path && (
         <Button type="button" variant="ghost" size="sm" onClick={() => onFilter('')} data-testid="own-filter-clear">
           <X className="size-3" /> Clear
         </Button>
       )}
+      <Button type="submit" variant="outline" size="sm">
+        Filter
+      </Button>
     </form>
   );
 }
@@ -80,8 +88,8 @@ function OwnBody({ own }: { own: OwnActivity }) {
   if (own.events.length === 0) {
     return (
       <p className="text-xs text-muted-foreground" data-testid="own-none">
-        {own.path
-          ? `No public changes of yours at ${own.path}.`
+        {own.shownPath
+          ? `No public changes of yours at ${own.shownPath}.`
           : 'Nothing yet. Your first public file will show up here.'}
       </p>
     );
@@ -93,7 +101,8 @@ function OwnBody({ own }: { own: OwnActivity }) {
           <span className="text-2xl font-semibold tabular-nums">{own.events.length}</span>
           <span className="text-xs text-muted-foreground">
             {own.more ? 'newest changes' : 'changes, all there are'}
-            {own.path && ` at ${own.path}`} · {own.folders.length} {own.folders.length === 1 ? 'folder' : 'folders'}
+            {own.shownPath && ` at ${own.shownPath}`} · {own.folders.length}{' '}
+            {own.folders.length === 1 ? 'folder' : 'folders'}
           </span>
         </div>
         <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
@@ -106,7 +115,7 @@ function OwnBody({ own }: { own: OwnActivity }) {
             aria-label="Read again"
             data-testid="own-refresh"
           >
-            <RefreshCw className="h-3 w-3" />
+            <RefreshCw className={cn('h-3 w-3', own.refreshing && 'animate-spin')} />
           </Button>
         </p>
       </div>
