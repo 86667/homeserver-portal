@@ -1,7 +1,9 @@
 name: Release archive
 
 # On a version tag: the built page as one archive attached to the GitHub
-# release. This is what the README's "Run it for your homeserver" downloads.
+# release, whose notes are generated from the commit subjects since the last
+# tag, as pubky-homeserver does. This is what the README's "Run it for your
+# homeserver" downloads.
 on:
   push:
     tags:
@@ -58,16 +60,38 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Groups the conventional-commit subjects between the previous tag and
+      # this one. It has nothing to compare the first tag with, so it may fail
+      # there; the release then gets GitHub's own generated notes.
+      - name: Generate the release notes
+        id: notes
+        continue-on-error: true
+        uses: requarks/changelog-action@v1
+        with:
+          token: ${{ github.token }}
+          tag: ${{ github.ref_name }}
+          excludeTypes: ''
+          useGitmojis: false
+          writeToFile: false
+
       - name: Fetch the archive
         uses: actions/download-artifact@v8
         with:
           name: release-archive
           path: release
 
+      # A release someone made by hand for the tag keeps the notes they wrote.
       - name: Attach the archive to the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          NOTES: ${{ steps.notes.outputs.changes }}
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            if [[ -n "$NOTES" ]]; then
+              gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes "$NOTES"
+            else
+              gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+            fi
+          fi
           gh release upload "$GITHUB_REF_NAME" release/*.tar.gz --clobber

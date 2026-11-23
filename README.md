@@ -99,7 +99,14 @@ npm run typecheck
 npm run build                               # static files in dist/
 ```
 
-`scripts/release-archive.sh` packs `dist/` into the release archive and `scripts/smoke-test-archive.sh <archive>` checks one by unpacking and serving it. A release is a `v*.*.*` tag that matches the version in `package.json`: the release workflow builds, packs and smoke-tests the archive and attaches it to the GitHub release.
+`scripts/release-archive.sh` packs `dist/` into the release archive and `scripts/smoke-test-archive.sh <archive>` checks one by unpacking and serving it.
+
+### Releasing
+
+1. In a pull request titled `chore: vx.y.z`, set the new version in `package.json` (`npm version <x.y.z> --no-git-tag-version` also updates the lockfile). Merge it.
+2. Tag that commit on `main` as `vx.y.z` and push the tag.
+
+The release workflow does the rest: it builds, packs and smoke-tests the archive, creates the GitHub release and attaches the archive. It fails, publishing nothing, when the tag does not match `package.json`. The release notes are generated from the commit subjects since the previous tag, grouped by their conventional-commit type, so a pull request's title is its line in the notes.
 
 `npm run e2e` drives the page in Chrome against a local pubky-testnet, with the Pubky SDK playing Ring; it skips when no testnet answers. See the header of `e2e/account.spec.mjs` for its settings.
 
