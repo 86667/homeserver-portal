@@ -9,11 +9,13 @@ import type { RingRequestKind } from '../homeserver-client';
 interface WaitingStepProps {
   kind: RingRequestKind;
   authUrl: string;
+  /** Whether this browser keeps the sign-in after the page is closed. */
+  staysSignedIn: boolean;
   onCancel: () => void;
 }
 
 /** The QR code for Ring, and the same request as a link for Ring on this device. */
-export function WaitingStep({ kind, authUrl, onCancel }: WaitingStepProps) {
+export function WaitingStep({ kind, authUrl, staysSignedIn, onCancel }: WaitingStepProps) {
   const { copiedKey, copy } = useCopyFeedback();
   const copied = copiedKey !== null;
 
@@ -25,8 +27,11 @@ export function WaitingStep({ kind, authUrl, onCancel }: WaitingStepProps) {
           : 'Scan with Pubky Ring and approve the sign-in.'}
       </p>
       <p className="text-center text-xs text-muted-foreground/70" data-testid="account-consent">
-        Ring will ask you to let this page read all your data here, and write none: the homeserver reports an account
-        only to such a grant. The page reads your account with it once, then revokes it.
+        Ring will ask you to let this page read all your data here, and write your profile only. The homeserver reports
+        an account only to a grant that reads everything; the write is for editing your profile.{' '}
+        {staysSignedIn
+          ? 'You stay signed in on this browser until you sign out, which revokes this access.'
+          : 'Signing out revokes this access.'}
       </p>
       <div className="rounded-lg border border-border bg-white p-3 shadow-sm">
         <QRCodeSVG value={authUrl} size={220} level="M" data-testid="account-qr" />

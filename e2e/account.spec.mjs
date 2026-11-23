@@ -156,7 +156,10 @@ try {
     signUpLink.includes(`hs=${info.public_key}`) && signUpLink.includes(`st=${code}`),
     'link names homeserver and code',
   );
-  check(decodeURIComponent(signUpLink).includes('caps=/:r&'), 'the grant asks to read everything, as /account needs');
+  check(
+    decodeURIComponent(signUpLink).includes('caps=/:r,/pub/pubky.app/profile.json:rw&'),
+    'the grant asks to read everything, as /account needs, and to write the profile only',
+  );
   check(
     (await page.textContent('[data-testid="account-consent"]')).includes('read all your data'),
     'the page says what Ring will ask for',
@@ -175,17 +178,25 @@ try {
   check(summary.includes('Download') && summary.includes('Upload'), 'transfer limits shown');
   check(!(await page.$('[data-testid="account-disabled"]')), 'a fresh account is not disabled');
 
-  step("the grant the page used is revoked: Ring's list of grants for alice is empty");
-  const aliceSession = await pubky.signer(alice).signin('account-e2e');
-  const grants = await new GrantManager(aliceSession).list();
-  const pageGrants = grants.filter((g) => g.clientId !== 'account-e2e');
-  check(pageGrants.length === 0, 'no grant left behind by the page', JSON.stringify(pageGrants.map((g) => g.clientId)));
-  await aliceSession.signout();
+  step('the profile editor writes a first profile through the grant the page holds');
+  await page.click('[data-testid="profile-edit"]');
+  await page.fill('#profile-name', 'Alice');
+  await page.click('[data-testid="profile-save"]');
+  await page.waitForSelector('[data-testid="profile-name"]', { timeout: 30_000 });
+  const stored = await pubky.publicStorage.getJson(`pubky://${alice.publicKey.z32()}/pub/pubky.app/profile.json`);
+  check(stored.name === 'Alice', 'the profile is on the homeserver', JSON.stringify(stored));
 
   step('back at the start, the spent code shows as used');
   await page.click('button:has-text("Sign out")');
   await page.waitForSelector('text=This invite code has already been used.', { timeout: 30_000 });
   check(true, 'spent code reported as used');
+
+  step("signing out revoked the grant the page held: Ring's list of grants for alice is empty");
+  const aliceSession = await pubky.signer(alice).signin('account-e2e');
+  const grants = await new GrantManager(aliceSession).list();
+  const pageGrants = grants.filter((g) => g.clientId !== 'account-e2e');
+  check(pageGrants.length === 0, 'no grant left behind by the page', JSON.stringify(pageGrants.map((g) => g.clientId)));
+  await aliceSession.signout();
 
   step('Ring falling back to a key it already has: the code stays unused');
   await page.fill('#invite-code', await mintCode());

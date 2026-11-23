@@ -8,9 +8,16 @@
  * This is the only module that loads the Pubky SDK. It is loaded on demand in
  * the browser: it is large, and its Node build must never run in the server.
  */
-import type { Capabilities, GrantSession, Pubky, Session } from '@synonymdev/pubky';
+import type {
+  AccountInfo as SdkAccount,
+  AuthFlowKind,
+  Capabilities,
+  GrantSession,
+  Pubky,
+  Session,
+} from '@synonymdev/pubky';
 import { parseHomeserverTime } from './account';
-import { parseEventStream, parseFeed } from './activity';
+import { parseEventStream } from './activity';
 import {
   type AccountConfig,
   type AccountInfo,
@@ -19,13 +26,16 @@ import {
   type HomeserverInfo,
   type InviteStatus,
   type Profile,
-  type PublicFile,
   ACCOUNT_CAPABILITY,
+  PROFILE_PATH,
   readsRoot,
+  writesProfile,
   type SignedRecord,
 } from './model';
 import { parseSignedRecord } from './pkarr';
+import { type ProfileEdit, isFollowableLink, mergeProfile } from './profile';
 import { withTimeout } from './with-timeout';
+import { messageOf } from './format';
 
 type Sdk = typeof import('@synonymdev/pubky');
 
@@ -36,19 +46,9 @@ export type RingRequest = {
   authUrl: string;
   /** Resolves once Ring's approval has been checked against this homeserver; rejects when the request expires. */
   awaitAccount: () => Promise<AccountInfo>;
+  /** Whether an approved sign-in outlasts the page on this browser. */
+  staysSignedIn: boolean;
 };
-
-/**
- * The account as the SDK's `GrantSession.account()` returns it, with the
- * method itself optional: SDK releases up to 0.17.1 do not have it.
- */
-type SdkAccount = {
-  createdAt: string;
-  disabled: boolean;
-  usedBytes: number;
-  quota: AccountRecord['quota'];
-};
-type GrantView = GrantSession & { account?: () => Promise<SdkAccount> };
 
 /** The SDK's error for a homeserver's refusal names the pubky it could not place. */
 const UNRESOLVED_HOMESERVER = /could not resolve homeserver for ([a-z0-9]{52})/;
@@ -56,24 +56,35 @@ const UNRESOLVED_HOMESERVER = /could not resolve homeserver for ([a-z0-9]{52})/;
 /**
  * How long a request waits for Ring. Long enough to install Ring and create a
  * key first, for a sign-up. The SDK cannot stop waiting on the relay, so an
- * abandoned request keeps polling until the page is closed; it is ignored.
+ * abandoned request keeps polling until the page is closed; an approval that
+ * still arrives for it is revoked.
  */
 const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** How long a visit waits for a saved sign-in to be checked before starting signed out. */
+const RESTORE_TIMEOUT_MS = 10 * 1000;
 
 /** A syntactically valid code no homeserver issues; asks whether codes are required. */
 const PROBE_INVITE_CODE = '0000-0000-0000';
 
-/** Files per listing request; the homeserver pages beyond that with a cursor. */
-const LIST_PAGE = 1000;
 /** An avatar larger than this is not shown. */
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
-/** Events per feed request: the homeserver's maximum. */
-const FEED_PAGE = 1000;
 /** Where a key's signed record is read from: the Pubky SDK's default relay, or the testnet's. */
 const PKARR_RELAY = 'https://pkarr.pubky.app';
 const TESTNET_PKARR_PORT = 15411;
 
 export class HomeserverClient {
+  /** The signed-in person's session, kept to write their profile with; null when nobody is signed in. */
+  private session: Session | null = null;
+  /** The saved record of that session in the browser's store, when it has one. */
+  private savedId: string | null = null;
+  /** The Ring request whose approval would sign someone in; an approval for any other is revoked. */
+  private request: object | null = null;
+  /** The check of a saved sign-in that may still sign someone in; one that timed out or was overtaken may not. */
+  private restoring: object | null = null;
+  /** Whether this browser can keep a sign-in across visits; found out once, on first need. */
+  private keepsSignIn: Promise<boolean> | null = null;
+
   private constructor(
     private readonly sdk: Sdk,
     private readonly pubky: Pubky,
@@ -106,24 +117,52 @@ export class HomeserverClient {
 
   /** Starts a Ring request; `inviteCode` only for a sign-up on a homeserver that needs one. */
   async startRequest(kind: RingRequestKind, inviteCode: string | null): Promise<RingRequest> {
-    const flow = await this.pubky.startGrantAuthFlow(
-      ACCOUNT_CAPABILITY as Capabilities,
-      this.flowKind(kind, inviteCode),
-      {
-        clientId: clientId(),
-        relay: this.config.relay,
-      },
-    );
+    const mine = {};
+    await this.endSignIn(mine);
+    const flow = await this.startFlow(this.flowKind(kind, inviteCode));
     const account = flow.awaitApproval().then(
-      (session) => this.confirmAccount(session),
+      (session) => this.confirmAccount(session, mine),
       (error: unknown) => noAccountOf(error),
     );
     // An abandoned request may still fail later; nobody is waiting for it then.
     account.catch(() => undefined);
     return {
       authUrl: flow.authorizationUrl,
-      awaitAccount: () => withTimeout(account, APPROVAL_TIMEOUT_MS, 'This request expired. Start again.'),
+      staysSignedIn: await this.canKeepSignIn(),
+      awaitAccount: () =>
+        withTimeout(account, APPROVAL_TIMEOUT_MS, 'This request expired. Start again.').catch((error: unknown) => {
+          // Expired or failed: an approval that comes later signs nobody in.
+          if (this.request === mine) this.request = null;
+          throw error;
+        }),
     };
+  }
+
+  /**
+   * A grant flow whose session can be kept across visits where the browser
+   * allows: a "delegated" one, signed for with a key the browser holds and
+   * script cannot copy out. Elsewhere a plain flow, whose session lasts until
+   * the page is closed and is never saved.
+   */
+  private async startFlow(kind: AuthFlowKind) {
+    const capabilities = ACCOUNT_CAPABILITY as Capabilities;
+    const options = { clientId: clientId(), relay: this.config.relay };
+    return (await this.canKeepSignIn())
+      ? this.sdk.GrantAuthFlow.startDelegated(capabilities, kind, options)
+      : this.pubky.startGrantAuthFlow(capabilities, kind, options);
+  }
+
+  /**
+   * Whether a sign-in can outlast the page here: the browser must hold keys
+   * and a store for them. Never on a testnet, which only the SDK's facade
+   * knows how to reach, and the delegated flow starts without it.
+   */
+  private canKeepSignIn(): Promise<boolean> {
+    this.keepsSignIn ??= (async () =>
+      !this.config.testnetHost &&
+      this.sdk.GrantAuthFlow.isDelegationAvailable &&
+      (await this.pubky.browserSessionStore.isAvailable()))().catch(() => false);
+    return this.keepsSignIn;
   }
 
   private flowKind(kind: RingRequestKind, inviteCode: string | null) {
@@ -136,68 +175,185 @@ export class HomeserverClient {
   /**
    * Ring's approval opened a session at the person's homeserver: the one
    * their own record names, or, for a sign-up, this one. Reads the account
-   * through it, then revokes the grant: the page keeps no session. A session
-   * at another homeserver means no account here, whatever is there.
+   * through it. A session at another homeserver means no account here,
+   * whatever is there. The session is kept, for the profile editor, only when
+   * the account is here, Ring granted writing the profile, and `request` is
+   * still the one being waited for: an approval that arrives after Cancel,
+   * after the request expired or after a newer request signs nobody in.
+   * Otherwise the grant is revoked at once. A kept session is also saved in
+   * the browser where it can be, so the next visit starts signed in.
    */
-  private async confirmAccount(session: Session): Promise<AccountInfo> {
-    const pubky = session.info.publicKey.z32();
+  private async confirmAccount(session: Session, request: object): Promise<AccountInfo> {
+    let keep = false;
     try {
-      const grant = session.grant as GrantView | undefined;
-      if (!grant) throw new Error('The sign-in did not open a grant session');
-      const info = await grant.sessionInfo();
-      const homeserver = info.homeserver.z32();
-      if (homeserver !== this.config.homeserver) return { pubky, hasAccount: false, otherHomeserver: homeserver };
-      if (!info.capabilities.some(readsRoot)) return { pubky, hasAccount: true, partialGrant: true };
-      const account = await readAccount(grant);
-      return account ? { pubky, hasAccount: true, account } : { pubky, hasAccount: true };
+      const account = await this.readAccountInfo(session);
+      keep = keepsSessionFor(account);
+      return account;
     } finally {
-      // Best effort: a grant left behind expires on its own.
-      await session.signout().catch(() => undefined);
+      if (keep && this.request === request) {
+        this.request = null;
+        this.session = session;
+        if (await this.canKeepSignIn()) await this.saveSignIn(session);
+      } else await revoke(session);
+    }
+  }
+
+  /** Saves a session just adopted. Not saved is not a failure: the sign-in then lasts until the page is closed. */
+  private async saveSignIn(session: Session): Promise<void> {
+    const store = this.pubky.browserSessionStore;
+    const saved = await store.save(session).catch(() => null);
+    if (!saved) return;
+    // Signed out while it was being saved: that sign-out found nothing to forget.
+    if (this.session === session) this.savedId = saved.id;
+    else await store.remove(saved.id).catch(() => undefined);
+  }
+
+  /**
+   * The account of whoever stayed signed in on this browser, or null when
+   * nobody did. A saved sign-in the homeserver no longer honours (its grant
+   * was revoked in Ring, or ran out) is forgotten. One that cannot be checked
+   * within ten seconds is left saved for the next visit, and signs nobody in
+   * on this one, however its check ends. Never throws.
+   */
+  async restoreSignIn(): Promise<AccountInfo | null> {
+    const mine = {};
+    this.restoring = mine;
+    const restored = this.canKeepSignIn().then((keeps) => (keeps ? this.restoreSaved(mine) : null));
+    return withTimeout(restored, RESTORE_TIMEOUT_MS, 'The saved sign-in could not be checked in time')
+      .catch(() => null)
+      .finally(() => {
+        if (this.restoring === mine) this.restoring = null;
+      });
+  }
+
+  /** The newest saved sign-in for this homeserver that it still honours; another tab may have saved a later one. */
+  private async restoreSaved(restoring: object): Promise<AccountInfo | null> {
+    const store = this.pubky.browserSessionStore;
+    // A sign-out that was cut short (the tab was closed, the homeserver was slow) is finished first.
+    for (const [pubky, at] of Object.entries(signingOut.read())) await this.forgetSignIns(pubky, at);
+    // What could not be forgotten just now is signed out all the same.
+    const signedOut = signingOut.read();
+    for (const { id, publicKey, createdAt } of await this.savedSignIns()) {
+      if (createdAt <= (signedOut[publicKey] ?? -Infinity)) continue;
+      try {
+        const session = await store.restore(id);
+        const account = await this.readAccountInfo(session);
+        // Timed out, or a sign-in or sign-out took over meanwhile: the rest stays saved, unchecked.
+        if (this.restoring !== restoring) return null;
+        if (keepsSessionFor(account)) {
+          this.session = session;
+          this.savedId = id;
+          return account;
+        }
+        // Not a sign-in the page keeps a session for.
+        await revoke(session);
+        await store.remove(id).catch(() => undefined);
+      } catch (error) {
+        if (isDeadSignIn(error)) await store.remove(id).catch(() => undefined);
+      }
+    }
+    return null;
+  }
+
+  /** The sign-ins saved in this browser for this homeserver, newest first; `pubky`'s only when given. */
+  private async savedSignIns(pubky?: string) {
+    const saved = await this.pubky.browserSessionStore.list();
+    return saved
+      .filter((record) => record.homeserver === this.config.homeserver && (!pubky || record.publicKey === pubky))
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  private async readAccountInfo(session: Session): Promise<AccountInfo> {
+    const pubky = session.info.publicKey.z32();
+    const grant = session.grant;
+    if (!grant) throw new Error('The sign-in did not open a grant session');
+    const info = await grant.sessionInfo();
+    const homeserver = info.homeserver.z32();
+    if (homeserver !== this.config.homeserver) return { pubky, hasAccount: false, otherHomeserver: homeserver };
+    const canEditProfile = info.capabilities.some(writesProfile);
+    if (!info.capabilities.some(readsRoot)) return { pubky, hasAccount: true, partialGrant: true, canEditProfile };
+    const account = await readAccount(grant);
+    return { pubky, hasAccount: true, canEditProfile, ...(account && { account }) };
+  }
+
+  /**
+   * Signs out: abandons any Ring request or check of a saved sign-in,
+   * revokes the grant the page holds and forgets every sign-in saved in this
+   * browser for the same person, revoking those too. Sign-ins saved for
+   * other people are left alone. Never throws.
+   */
+  signOut(): Promise<void> {
+    return this.endSignIn(null);
+  }
+
+  /**
+   * Ends the sign-in and makes `next` the request being waited for, at once:
+   * a slower call that started earlier must not take that over. The saved
+   * sign-in is needed to revoke with, so the sign-out is noted first and the
+   * record forgotten after: if the revocation does not land (the homeserver
+   * is slow or out of reach, the tab is closed), the next visit still starts
+   * signed out, and tries again.
+   */
+  private async endSignIn(next: object | null): Promise<void> {
+    const { session, savedId } = this;
+    this.request = next;
+    this.restoring = null;
+    this.session = null;
+    this.savedId = null;
+    if (!session) return;
+    const pubky = session.info.publicKey.z32();
+    const at = signingOut.mark(pubky);
+    const revoked = await revoke(session);
+    if (!(await this.canKeepSignIn())) signingOut.clear(pubky, at);
+    else if (revoked || !savedId) await this.forgetSignIns(pubky, at, savedId);
+  }
+
+  /**
+   * Revokes and forgets the sign-ins saved for `pubky` up to the sign-out at
+   * `at`; one saved since is a new sign-in, and stays. `revoked` is the one
+   * whose grant is revoked already. A sign-in that could not be revoked stays
+   * saved, with the note of the sign-out, for the next visit to try again.
+   */
+  private async forgetSignIns(pubky: string, at: number, revoked: string | null = null): Promise<void> {
+    const store = this.pubky.browserSessionStore;
+    const signedOut = async () => (await this.savedSignIns(pubky)).filter((record) => record.createdAt <= at);
+    try {
+      for (const { id } of await signedOut()) {
+        const gone = id === revoked || (await store.restore(id).then(revoke, isDeadSignIn));
+        // Gone too when another tab forgot it meanwhile. A failure to remove tells little: revoking can take the
+        // record away already.
+        if (gone) await store.remove(id).catch(() => undefined);
+      }
+      if ((await signedOut()).length === 0) signingOut.clear(pubky, at);
+    } catch {
+      // The store could not be read: still noted as signed out.
     }
   }
 
   /**
-   * Every file under `pubky`'s `/pub/` on this homeserver, oldest path first,
-   * without sizes: the listing names files only. At most `max` files; more
-   * than that is reported by the caller as "and more". Public data: it needs no session.
+   * Writes an edited profile for the signed-in person. The stored file is
+   * read first and only the edited parts replaced, so its picture and whatever
+   * else another app keeps there survive.
    */
-  async listPublicFiles(
-    pubky: string,
-    max = 5000,
-    pageSize = LIST_PAGE,
-  ): Promise<{ files: PublicFile[]; more: boolean }> {
-    const files: PublicFile[] = [];
-    let cursor: string | null = null;
-    while (files.length < max) {
-      const limit = Math.min(pageSize, max - files.length);
-      const query = `limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
-      const response = await this.homeserverFetch(`/storage/${pubky}/pub/?${query}`);
-      if (response.status === 404) break; // nothing stored yet
-      if (!response.ok) throw new Error(`The homeserver could not list the files (${response.status})`);
-      const page = parseListing(await response.text());
-      files.push(...page);
-      if (page.length < limit) return { files, more: false };
-      cursor = page[page.length - 1].url;
+  async saveProfile(edit: ProfileEdit): Promise<void> {
+    if (!this.session) throw new Error('You are signed out. Sign in again to save your profile.');
+    const storage = this.session.storage;
+    try {
+      const stored = await storage.getJson(PROFILE_PATH).catch((error: unknown) => {
+        if (statusCodeOf(error) === 404) return {};
+        throw error;
+      });
+      await storage.putJson(PROFILE_PATH, mergeProfile(isRecord(stored) ? stored : {}, edit));
+    } catch (error) {
+      // Signed out in another tab, or revoked in Ring, since this page signed in.
+      if (isEndedSignIn(error)) throw new Error('Your sign-in has ended. Sign out and sign in again.');
+      throw error;
     }
-    return { files, more: files.length >= max };
   }
 
-  /** The file's size, modification time and type, from a HEAD request. */
-  async fileStats(file: PublicFile): Promise<Pick<PublicFile, 'size' | 'modifiedAt' | 'contentType'>> {
-    const response = await this.homeserverFetch(storagePath(file.url), { method: 'HEAD' });
-    if (!response.ok) throw new Error(`The homeserver could not describe ${file.path} (${response.status})`);
-    const modified = response.headers.get('last-modified');
-    const modifiedAt = modified ? new Date(modified) : undefined;
-    return {
-      size: Number(response.headers.get('content-length') ?? NaN) || 0,
-      modifiedAt: modifiedAt && !Number.isNaN(modifiedAt.getTime()) ? modifiedAt : undefined,
-      contentType: response.headers.get('content-type') ?? undefined,
-    };
-  }
-
-  /** The person's pubky.app profile, or null when they have none here. `withAvatar` false skips the image. */
-  async profile(pubky: string, withAvatar = true): Promise<Profile | null> {
-    const response = await this.homeserverFetch(`/storage/${pubky}/pub/pubky.app/profile.json`);
+  /** The person's pubky.app profile, or null when they have none here. */
+  async profile(pubky: string): Promise<Profile | null> {
+    const response = await this.homeserverFetch(`/storage/${pubky}${PROFILE_PATH}`, { cache: 'no-store' });
     if (response.status === 404) return null;
     if (!response.ok) throw new Error(`The homeserver could not read the profile (${response.status})`);
     const raw = (await response.json()) as Record<string, unknown>;
@@ -206,11 +362,9 @@ export class HomeserverClient {
       name: raw.name,
       bio: typeof raw.bio === 'string' && raw.bio.trim() ? raw.bio : null,
       status: typeof raw.status === 'string' && raw.status.trim() ? raw.status : null,
-      links: Array.isArray(raw.links) ? raw.links.filter(isLink) : [],
-      avatar:
-        withAvatar && typeof raw.image === 'string' && raw.image
-          ? await this.avatar(raw.image).catch(() => null)
-          : null,
+      // Another app may have stored an address that runs script; such a link is not shown.
+      links: Array.isArray(raw.links) ? raw.links.filter(isLink).filter((link) => isFollowableLink(link.url)) : [],
+      avatar: typeof raw.image === 'string' && raw.image ? await this.avatar(raw.image).catch(() => null) : null,
     };
   }
 
@@ -263,64 +417,23 @@ export class HomeserverClient {
 
   /**
    * One person's newest public events, newest first, at most `limit`; with a
-   * `cursor` (from the previous page) the ones before it. One request each:
-   * the event stream answers a batch and closes.
+   * `cursor` (from the previous page) the ones before it. With a `path`
+   * under `/pub/`, only that file's events or, when it is a folder, those of
+   * everything in it. One request each: the event stream answers a batch
+   * and closes.
    */
   async ownEvents(
     pubky: string,
     cursor: string | null,
     limit: number,
+    path = '',
   ): Promise<{ events: FeedEvent[]; cursor: string | null }> {
     const user = cursor ? `${pubky}:${encodeURIComponent(cursor)}` : pubky;
-    const response = await this.homeserverFetch(`/events-stream?user=${user}&reverse=true&limit=${limit}`);
+    // The homeserver takes a path with a trailing slash as a folder and one without as a single file: ask for both.
+    const under = path ? `&path=${encodeURIComponent(`/pub/${path}`)}&path=${encodeURIComponent(`/pub/${path}/`)}` : '';
+    const response = await this.homeserverFetch(`/events-stream?user=${user}&reverse=true&limit=${limit}${under}`);
     if (!response.ok) throw new Error(`The homeserver could not list your changes (${response.status})`);
     return parseEventStream(await response.text());
-  }
-
-  /** The public events after `cursor` ('0' for the start of the feed), oldest first, at most `limit`. */
-  async eventsAfter(cursor: string, limit: number): Promise<{ events: FeedEvent[]; cursor: string | null }> {
-    const response = await this.homeserverFetch(`/events/?cursor=${encodeURIComponent(cursor)}&limit=${limit}`);
-    if (!response.ok) throw new Error(`The homeserver could not list its events (${response.status})`);
-    return parseFeed(await response.text());
-  }
-
-  /**
-   * The newest `max` public events, oldest first, with the cursor to poll
-   * for more and, when the whole feed fit in one page, how long it is. A
-   * longer feed is reached from its end: a few one-line probes find the
-   * last event's position, then one request reads the window before it.
-   */
-  async latestEvents(max: number): Promise<{ events: FeedEvent[]; cursor: string; total: number | null }> {
-    const first = await this.eventsAfter('0', FEED_PAGE);
-    if (first.events.length < FEED_PAGE) {
-      return { events: first.events.slice(-max), cursor: first.cursor ?? '0', total: first.events.length };
-    }
-    const end = await this.feedEnd(Number(first.cursor));
-    const window = await this.eventsAfter(String(Math.max(0, end - max)), max);
-    return { events: window.events, cursor: window.cursor ?? String(end), total: null };
-  }
-
-  /** The position of the feed's last event, knowing the event at `known` exists. Positions grow by one per event. */
-  private async feedEnd(known: number): Promise<number> {
-    // The first event after `position`, or null when there is none.
-    const next = async (position: number) => {
-      const page = await this.eventsAfter(String(position), 1);
-      return page.cursor === null ? null : Number(page.cursor);
-    };
-    let low = known;
-    let high = known * 2;
-    for (let found = await next(high); found !== null; found = await next(high)) {
-      low = found;
-      high *= 2;
-    }
-    // Now the last event is at low or later, and none is after high.
-    while (low < high) {
-      const middle = Math.floor((low + high) / 2);
-      const found = await next(middle);
-      if (found === null) high = middle;
-      else low = found;
-    }
-    return low;
   }
 
   private homeserverFetch(path: string, init: RequestInit = {}): Promise<Response> {
@@ -330,12 +443,11 @@ export class HomeserverClient {
 
 /**
  * The account as the homeserver reports it, or undefined when it does not:
- * a homeserver from before `GET /account` takes the path for a storage read
- * and refuses it (403 on 0.17, 404 otherwise), and an SDK from before
- * `account()` cannot ask. Any other failure is reported.
+ * a homeserver from before `GET /account` (0.18) takes the path for a storage
+ * read and refuses it (403 on 0.17, 404 otherwise). Any other failure is
+ * reported.
  */
-async function readAccount(grant: GrantView): Promise<AccountRecord | undefined> {
-  if (typeof grant.account !== 'function') return undefined;
+async function readAccount(grant: GrantSession): Promise<AccountRecord | undefined> {
   try {
     return toAccountRecord(await grant.account());
   } catch (error) {
@@ -343,6 +455,83 @@ async function readAccount(grant: GrantView): Promise<AccountRecord | undefined>
     throw error;
   }
 }
+
+/**
+ * The people a sign-out is under way for and when each began, noted where a
+ * write lands at once (`localStorage`), unlike the store their sign-ins are
+ * saved in. Storage that cannot be used is no failure: the sign-out then
+ * depends on finishing.
+ */
+const signingOut = {
+  key: 'homeserver-portal:signing-out',
+  /** Pubky to the time of the sign-out, in Unix milliseconds. */
+  read(): Record<string, number> {
+    try {
+      const noted: unknown = JSON.parse(localStorage.getItem(this.key) ?? '{}');
+      return isRecord(noted)
+        ? Object.fromEntries(
+            Object.entries(noted).filter((entry): entry is [string, number] => typeof entry[1] === 'number'),
+          )
+        : {};
+    } catch {
+      return {};
+    }
+  },
+  write(noted: Record<string, number>) {
+    try {
+      if (Object.keys(noted).length > 0) localStorage.setItem(this.key, JSON.stringify(noted));
+      else localStorage.removeItem(this.key);
+    } catch {
+      // No storage: nothing to note it in.
+    }
+  },
+  /** Notes a sign-out beginning now, and returns when that is. */
+  mark(pubky: string): number {
+    const at = Date.now();
+    this.write({ ...this.read(), [pubky]: at });
+    return at;
+  },
+  /** Drops the note of the sign-out at `at`; a later one for the same person stays. */
+  clear(pubky: string, at: number) {
+    const { [pubky]: noted, ...others } = this.read();
+    if (noted !== undefined && noted <= at) this.write(others);
+  },
+};
+
+/**
+ * Whether a saved sign-in failed because the homeserver no longer honours it,
+ * not because it could not be asked. The SDK reports a refused restore as a
+ * `ClientStateError`; a refusal met later carries the HTTP status.
+ */
+function isDeadSignIn(error: unknown): boolean {
+  return isEndedSignIn(error) || statusCodeOf(error) === 403;
+}
+
+/**
+ * Whether a write failed because the session behind it is gone: signed out
+ * in another tab, or revoked in Ring. Not 403, which a write also gets for an
+ * account that may not write.
+ */
+function isEndedSignIn(error: unknown): boolean {
+  return (error as { name?: unknown } | null)?.name === 'ClientStateError' || statusCodeOf(error) === 401;
+}
+
+/** Whether the page keeps a session for this account: it is here, and Ring granted writing its profile. */
+const keepsSessionFor = (account: AccountInfo) => account.hasAccount && account.canEditProfile === true;
+
+/**
+ * Revokes a session's grant; whether it is revoked now, which a session the
+ * homeserver had ended already also is. Best effort: a grant that could not be
+ * revoked stays listed in Ring until it expires.
+ */
+const revoke = (session: Session): Promise<boolean> =>
+  session.signout().then(
+    () => true,
+    (error: unknown) => isDeadSignIn(error),
+  );
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
 
 function toAccountRecord(account: SdkAccount): AccountRecord {
   return {
@@ -373,8 +562,6 @@ function statusCodeOf(error: unknown): number | null {
   return typeof status === 'number' ? status : null;
 }
 
-const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
-
 /** How the page names itself in Ring's list of grants: its host. */
 function clientId(): string {
   const host = typeof location === 'undefined' ? '' : location.hostname;
@@ -392,18 +579,6 @@ async function statusOf(response: Response): Promise<InviteStatus> {
   return 'error';
 }
 
-/** The files in a listing: one `pubky://` address per line; folders end with `/` and are skipped. */
-function parseListing(text: string): PublicFile[] {
-  return text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith('pubky://') && !line.endsWith('/'))
-    .map((url) => {
-      const path = url.slice(url.indexOf('/pub/') + '/pub/'.length);
-      return { url, path, app: path.includes('/') ? path.slice(0, path.indexOf('/')) : '' };
-    });
-}
-
 /** `https://host[:port]` of a response's URL, or null when it is not an http(s) URL. */
 function originOf(url: string): string | null {
   try {
@@ -412,11 +587,6 @@ function originOf(url: string): string | null {
   } catch {
     return null;
   }
-}
-
-/** `pubky://<user>/pub/x` as this homeserver's path-addressed route, `/storage/<user>/pub/x`. */
-function storagePath(url: string): string {
-  return `/storage/${url.slice('pubky://'.length)}`;
 }
 
 const isLink = (value: unknown): value is { title: string; url: string } =>
